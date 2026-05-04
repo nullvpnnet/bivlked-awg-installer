@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 installation and configuration script for Ubuntu/Debian servers
 # Author: @bivlked
-# Version: 5.11.3
-# Date: 2026-04-28
+# Version: 5.11.4
+# Date: 2026-05-04
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 set -o pipefail
-SCRIPT_VERSION="5.11.3"
+SCRIPT_VERSION="5.11.4"
 
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Verified in step5_download_scripts() after curl.
 # Verification is skipped when AWG_BRANCH is overridden (test branch).
 # Format: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="84e110db26ada96a5330edc1b6966545b1bd71c3a51435c347ab390f337eaf15"
-MANAGE_SCRIPT_SHA256="23ca1fd86fb0ec103635f85e24498b09d24cfb2348b43829e80363f4e69abcef"
+COMMON_SCRIPT_SHA256="ca34511e3bc526aa403eb0c341f2f758fc5415fc33a61f6b5e17a68abd0f3ed9"
+MANAGE_SCRIPT_SHA256="42f179e4aef39967ea156938dfdfd499f016a412142ef312ff9a353ece3a08b8"
 
 # CLI flags
 UNINSTALL=0; HELP=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0
@@ -168,6 +168,45 @@ apt_update_tolerant() {
         log_error "  $line"
     done
     return "$rc"
+}
+
+# ==============================================================================
+# apt_wait_for_ppa_package <package> [max_attempts] [initial_delay_seconds]
+#   Waits until the given package becomes visible in apt-cache, with
+#   exponential backoff between attempts. Needed in step 2 after the
+#   Amnezia PPA is added: ppa.launchpadcontent.net sometimes briefly
+#   goes down (issue #68), and without retries the first cold install
+#   fails even though the PPA is back a minute later.
+#
+#   IMPORTANT: this checks apt-cache show, not the rc of apt-get update.
+#   apt-get update returns 0 tolerantly even when an InRelease file did
+#   not download — so a plain rc-based retry does not catch a PPA outage.
+#   Package visibility in apt-cache is the only reliable signal that
+#   the PPA actually got indexed.
+#
+#   With the defaults (3 attempts × initial=30s) the timeline is:
+#   attempt 1 → sleep 30s → apt update + attempt 2 → sleep 60s →
+#   apt update + attempt 3 (last). After the third fail we return 1.
+#   Total wait between attempts is about 1.5 minutes.
+#
+#   The 1800s delay cap guards against arithmetic overflow if the helper
+#   is ever called with a very large max.
+# ==============================================================================
+apt_wait_for_ppa_package() {
+    local pkg="$1" max="${2:-3}" delay="${3:-30}" attempt
+    for ((attempt = 1; attempt <= max; attempt++)); do
+        if apt-cache show "$pkg" >/dev/null 2>&1; then
+            return 0
+        fi
+        if (( attempt == max )); then
+            return 1
+        fi
+        log_warn "Package '${pkg}' did not appear in apt-cache (attempt ${attempt}/${max}, PPA still unavailable), retrying in ${delay}s..."
+        sleep "$delay"
+        apt_update_tolerant >/dev/null 2>&1 || true
+        delay=$(( delay * 2 > 1800 ? 1800 : delay * 2 ))
+    done
+    return 1
 }
 
 # ==============================================================================
@@ -1852,7 +1891,20 @@ PPASRC
         fi
         log "PPA added."
     fi
-    apt_update_tolerant || die "apt update error."
+    apt_update_tolerant || log_warn "apt update returned non-zero; continuing — apt-cache will tell us whether the index is good."
+    # apt-get update is tolerant to an unreachable InRelease (rc=0 even when
+    # the PPA is down). So we check that amneziawg-dkms actually appears in
+    # apt-cache, with three attempts and 30s/60s backoff (~1.5 min total).
+    # A brief ppa.launchpadcontent.net outage (issue #68) must not break
+    # the install.
+    if ! apt_wait_for_ppa_package amneziawg-dkms 3 30; then
+        log_error "Package amneziawg-dkms did not appear in apt-cache after 3 attempts."
+        log_error "ppa.launchpadcontent.net appears to be down — this is a"
+        log_error "Launchpad infrastructure outage, not a script bug."
+        log_error "Wait 10–15 minutes and re-run the script with the same args."
+        log_error "Details: https://github.com/bivlked/amneziawg-installer/issues/68"
+        die "Amnezia PPA is temporarily unavailable."
+    fi
 
     # AmneziaWG + qrencode packages (NO Python!)
     log "Installing AmneziaWG packages..."
