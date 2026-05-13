@@ -5,12 +5,12 @@ A step-by-step guide for deploying an AmneziaWG 2.0 VPN server on a clean Ubuntu
 ## TL;DR
 
 - One command, MIT-licensed, fully self-hosted, no third-party dependencies at runtime.
-- Works on Ubuntu 24.04 LTS, Ubuntu 25.10, Debian 12 (bookworm), Debian 13 (trixie).
+- Works on Ubuntu 24.04 LTS, Ubuntu 25.10/26.04, Debian 12 (bookworm), Debian 13 (trixie).
 - Built for cheap VPS budgets: $3 to $5 a month, 1 vCPU, 512 MB RAM, 5 GB disk minimum.
-- Both x86_64 (amd64) and ARM64 (aarch64), with prebuilt kernel modules covering Raspberry Pi 4/5, Ubuntu 22.04/24.04/25.10 ARM64, and Debian 12/13 ARM64 (Hetzner CAX, Oracle Ampere A1, AWS Graviton all run on these stock kernels).
+- Both x86_64 (amd64) and ARM64 (aarch64), with prebuilt kernel modules covering Raspberry Pi 4/5, Ubuntu 24.04/25.10 ARM64, and Debian 12/13 ARM64 (Hetzner CAX, Oracle Ampere A1, AWS Graviton all run on these stock kernels). Ubuntu 26.04 ARM64 builds the module from source via DKMS.
 - DPI bypass for Russia (ТСПУ), Iran, China, school and corporate firewalls.
 - Survives kernel upgrades automatically via DKMS auto-repair (since v5.12.0).
-- Ubuntu 25.10 PPA fallback to noble is automatic since v5.13.0.
+- Ubuntu 25.10 and 26.04 PPA fallback to noble is automatic since v5.13.0.
 
 ## Choosing a VPS
 
@@ -25,7 +25,7 @@ Country matters mostly for latency and jurisdiction. ARM versus amd64 has no rea
 ## OS choice
 
 - **Ubuntu 24.04 LTS** is the best-tested platform. Default pick if you have no other preference.
-- **Ubuntu 25.10** (questing) works since v5.13.0. The PPA codename remaps to noble automatically when the questing PPA is unreachable (404 or network failure). Resilient against do-release-upgrade from 24.04.
+- **Ubuntu 25.10** (questing) and **Ubuntu 26.04** work since v5.13.0. The PPA codename remaps to `noble` automatically when the running codename PPA is unreachable (404 or network failure). Resilient against do-release-upgrade from 24.04.
 - **Debian 12** (bookworm) and **Debian 13** (trixie) are fully supported with codename mapping (focal and noble respectively).
 - Use a minimal install. The script assumes the box is single-purpose and will strip modemmanager, snapd, cloud-init leftovers and similar to free resources.
 - Avoid custom kernels (XanMod, Liquorix, Zen) on first install. DKMS compiles against the running kernel headers, but custom kernels can shift internal structs and trip a runtime panic. If you must, file a repro upstream rather than guessing.
@@ -97,7 +97,7 @@ The uninstall path is symmetric: it removes the AmneziaWG service, the kernel mo
 
 ## Troubleshooting
 
-- **PPA 404 on Ubuntu 25.10.** Automatic fallback to noble since v5.13.0. If you are still on v5.12.x, upgrade the installer.
+- **PPA 404 on Ubuntu 25.10 or 26.04.** Automatic fallback to noble since v5.13.0. If you are still on v5.12.x, upgrade the installer.
 - **DKMS build fails on stale kernel headers** (typical after `do-release-upgrade` 24.04 to 25.10). v5.13.0 detects stale headers (kernel version differs from the running kernel) and installs gcc-13 as a fallback compiler so DKMS autoinstall succeeds across the version mismatch. If DKMS still fails, `sudo bash /root/awg/manage_amneziawg.sh repair-module` forces a rebuild.
 - **Mobile carrier unstable or only connects on the third attempt.** Reinstall with `--preset=mobile`. Tested carriers (Russia): Yota (Moscow), Tele2 (Moscow), Tattelecom / Letai (Tatarstan), Beeline (default preset). Tele2 (Krasnoyarsk) and Megafon (regional networks) need `--preset=mobile` plus the I1 parameter removed. Full per-carrier table and the underlying Jc / Jmin / Jmax mechanics are in [ADVANCED.en.md FAQ](ADVANCED.en.md#faq-advanced-adv).
 - **Handshake completes but no packets flow.** Almost always the AllowedIPs gotcha on a custom split-tunnel config. Cover the server subnet too, not just the destinations you want. See [ADVANCED.en.md AllowedIPs](ADVANCED.en.md#allowedips-adv).

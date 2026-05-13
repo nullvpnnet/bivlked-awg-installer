@@ -11,11 +11,11 @@
 
 <p align="center">
   <strong>A set of Bash scripts for one-command installation, secure hardening,<br>
-  and easy management of an AmneziaWG 2.0 VPN server on Ubuntu (24.04 LTS / 25.10) and Debian (12 / 13)</strong>
+  and easy management of an AmneziaWG 2.0 VPN server on Ubuntu (24.04 LTS / 25.10 / 26.04) and Debian (12 / 13)</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Ubuntu-24.04_|_25.10-orange" alt="Ubuntu 24.04 | 25.10">
+  <img src="https://img.shields.io/badge/Ubuntu-24.04_|_25.10_|_26.04-orange" alt="Ubuntu 24.04 | 25.10 | 26.04">
   <img src="https://img.shields.io/badge/Debian-12_|_13-A81D33" alt="Debian 12 | 13">
   <img src="https://img.shields.io/badge/Architecture-x86__64_|_ARM64_|_ARMv7-green" alt="x86_64 | ARM64 | ARMv7">
   <a href="https://github.com/bivlked/amneziawg-installer/blob/main/LICENSE"><img src="https://img.shields.io/github/license/bivlked/amneziawg-installer" alt="License"></a>
@@ -56,7 +56,7 @@
 
 This set of scripts turns a clean VPS into a ready-to-use VPN server. No Linux knowledge required — the script configures the firewall, optimizes the system, and generates client configs and QR codes automatically.
 
-Works on Ubuntu 24.04/25.10 and Debian 12/13. Any cheap VPS with 1 GB RAM is enough.
+Works on Ubuntu 24.04/25.10/26.04 and Debian 12/13. Any cheap VPS with 1 GB RAM is enough.
 
 ---
 
@@ -145,7 +145,7 @@ All parameters are accepted automatically. Details: [ADVANCED.en.md#cli-params-a
 * **One command — working VPN** — from a clean VPS to a running server with client configs and QR codes
 * **Secure by default** — UFW, Fail2Ban, sysctl hardening, strict file permissions (600/700)
 * **Easy management** — add/remove clients, temporary clients with auto-removal, traffic stats, backups
-* **4 operating systems** — Ubuntu 24.04, Ubuntu 25.10, Debian 12, Debian 13
+* **4 operating systems** — Ubuntu 24.04, Ubuntu 25.10/26.04, Debian 12, Debian 13
 * **x86_64 and ARM** — cloud VPS, Raspberry Pi 3/4/5, ARM64 servers (AWS Graviton, Oracle Ampere, Hetzner)
 * **Mobile network optimization** — `--preset=mobile` for Tele2, Yota, Megafon and other carriers with DPI blocking. Fine-tune with `--jc`, `--jmin`, `--jmax` ([details](ADVANCED.en.md#presets-adv))
 
@@ -187,7 +187,7 @@ Your carrier is not on the list? Try `--preset=mobile`. If that doesn't work —
 <a id="requirements"></a>
 ## 🖥️ Requirements
 
-* **OS:** A **clean** installation of **Ubuntu Server 24.04 LTS** / **Ubuntu 25.10** (⚠️) / **Debian 12** / **Debian 13** Minimal
+* **OS:** A **clean** installation of **Ubuntu Server 24.04 LTS** / **Ubuntu 25.10** / **Ubuntu 26.04** / **Debian 12** / **Debian 13** Minimal
 * **Access:** `root` privileges (via `sudo`)
 * **Internet:** Stable connection
 * **Resources:** ~1 GB RAM (2+ GB recommended), minimum ~2 GB disk (3+ GB recommended)
@@ -198,7 +198,8 @@ Your carrier is not on the list? Try `--preset=mobile`. If that doesn't work —
 | OS | Status | Notes |
 |----|--------|-------|
 | Ubuntu 24.04 LTS | ✅ Fully supported | Recommended |
-| Ubuntu 25.10 | ⚠️ Experimental | May require building the kernel module from source |
+| Ubuntu 25.10 | ✅ Supported | PPA `noble` fallback applied automatically since v5.13.0 |
+| Ubuntu 26.04 | ✅ Supported | PPA `noble` fallback applied automatically since v5.13.0 |
 | Debian 12 (bookworm) | ✅ Supported | Tested. PPA via codename mapping to focal |
 | Debian 13 (trixie) | ✅ Supported | Tested. PPA via codename mapping to noble, DEB822 |
 
@@ -227,7 +228,7 @@ Your carrier is not on the list? Try `--preset=mobile`. If that doesn't work —
 
 For a stable, high-throughput VPN server, you need reliable hosting with a good network.
 
-We've tested and recommend [**FreakHosting**](https://freakhosting.com/clientarea/aff.php?aff=392). Their **BUDGET VPS** lineup offers excellent value for money.
+I've tested and recommend [**FreakHosting**](https://freakhosting.com/clientarea/aff.php?aff=392). Their **BUDGET VPS** lineup offers excellent value for money.
 
 Their IPs are not flagged as datacenter — they are not blocked by services that restrict hosting/datacenter IP ranges (unlike Azure and some major clouds).
 
@@ -243,9 +244,9 @@ This configuration is more than enough for comfortable AmneziaWG operation with 
 <a id="installation"></a>
 ## 🔧 Installation (Recommended Method)
 
-This installation method ensures correct handling of interactive prompts and colored output in your terminal.
+This installation method handles interactive prompts and colored output correctly in your terminal.
 
-1.  **Connect** to a **clean** server (Ubuntu 24.04 / Ubuntu 25.10 / Debian 12 / Debian 13) via SSH.
+1.  **Connect** to a **clean** server (Ubuntu 24.04 / Ubuntu 25.10 / Ubuntu 26.04 / Debian 12 / Debian 13) via SSH.
     > **Tip:** After creating the server, wait 5-10 minutes for all background initialization processes to complete before starting the installation.
 
 2.  **Download the script:**
@@ -466,7 +467,7 @@ For the changelog, see **[CHANGELOG.en.md](CHANGELOG.en.md)**.
 
 <details>
   <summary><strong>Q: Which hosting providers work well?</strong></summary>
-  <b>A:</b> Any VPS with Ubuntu 24.04 / Ubuntu 25.10 (⚠️) / Debian 12 / Debian 13, root access, and at least 1 GB RAM. We recommend providers with clean (non-blacklisted) IPs and unlimited traffic. See our <a href="#hosting-recommendation">recommendation</a>.
+  <b>A:</b> Any VPS with Ubuntu 24.04 LTS / Ubuntu 25.10 / Ubuntu 26.04 / Debian 12 / Debian 13, root access, and at least 1 GB RAM. Pick providers with clean (non-blacklisted) IPs and unlimited traffic. See the <a href="#hosting-recommendation">recommendation</a> below.
 </details>
 
 <details>
