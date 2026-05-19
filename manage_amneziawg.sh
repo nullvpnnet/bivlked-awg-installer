@@ -15,7 +15,7 @@ fi
 
 # --- Безопасный режим и Константы ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.13.0"
+SCRIPT_VERSION="5.14.0"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -27,6 +27,7 @@ NO_COLOR=0
 VERBOSE_LIST=0
 JSON_OUTPUT=0
 EXPIRES_DURATION=""
+CLI_CARRIER=""
 
 # --- Автоочистка временных файлов и директорий ---
 # _manage_temp_dirs хранит mktemp -d пути для backup/restore.
@@ -67,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --apply-mode=*)    _CLI_APPLY_MODE="${1#*=}"; export AWG_APPLY_MODE="$_CLI_APPLY_MODE"; shift ;;
         --psk)             CLI_ADD_PSK=1; shift ;;
         --yes)             CLI_YES=1; shift ;;
+        --carrier=*)       CLI_CARRIER="${1#*=}"; shift ;;
         --*)               echo "Неизвестная опция: $1" >&2; COMMAND="help"; break ;;
         *)
             if [[ -z "$COMMAND" ]]; then
@@ -848,6 +850,224 @@ check_server() {
 }
 
 # ==============================================================================
+# Diagnose: self-troubleshooting с опциональным сравнением по оператору
+# ==============================================================================
+
+# Известные операторы и рекомендуемые AWG-параметры.
+# Формат: jc_min jc_max jmin_lo jmin_hi jmax_offset_lo jmax_offset_hi i1_mode
+#   i1_mode: random (формат "<r N>"), absent (I1 не должно быть), binary ("<r N><b 0xHEX>")
+# Источник: ADVANCED.md operator matrix (только подтверждённые ✅ строки).
+# Megafon Москва из таблицы пока 🔄 тестируется (Jc=3, Jmin=80, Jmax=268) -
+# параметры широкие и не вписываются в mobile preset; добавим когда оператор
+# подтвердят и зафиксируют диапазоны. T-Mobile MO US - Discussion #45 (o2me).
+_diagnose_carrier_known() {
+    case "$1" in
+        beeline_msk)            echo "3 6 40 89 50 250 random" ;;
+        yota_msk|tele2_msk|tattelecom) echo "3 3 30 50 20 80 random" ;;
+        tele2_krasnoyarsk|megafon_regions) echo "3 3 30 50 20 80 absent" ;;
+        tmobile_us)             echo "6 6 10 10 40 40 binary" ;;
+        *)                       return 1 ;;
+    esac
+}
+
+_diagnose_carrier_list() {
+    echo "beeline_msk yota_msk tele2_msk tele2_krasnoyarsk tattelecom megafon_regions tmobile_us"
+}
+
+# Вывод одной строки результата с цветом
+_diag_line() {
+    local status="$1" msg="$2"
+    local color_start="" color_end=""
+    if [[ "$NO_COLOR" -eq 0 ]]; then
+        color_end="\033[0m"
+        case "$status" in
+            OK)   color_start="\033[0;32m" ;;
+            WARN) color_start="\033[0;33m" ;;
+            FAIL) color_start="\033[0;31m" ;;
+            INFO) color_start="\033[0;36m" ;;
+        esac
+    fi
+    printf "%b[%-4s]%b %s\n" "$color_start" "$status" "$color_end" "$msg"
+}
+
+# Главная функция: пробегается по health-checks + опционально сравнивает с оператором
+diagnose_server() {
+    local carrier="${CLI_CARRIER}"
+    local ok=0 warn=0 fail=0
+
+    log "Диагностика AmneziaWG 2.0 сервера..."
+    if [[ -n "$carrier" ]] && ! _diagnose_carrier_known "$carrier" >/dev/null; then
+        log_error "Неизвестный оператор: '$carrier'"
+        log_error "Поддерживаемые: $(_diagnose_carrier_list)"
+        return 1
+    fi
+
+    # 1. Kernel module
+    if lsmod 2>/dev/null | awk '$1 == "amneziawg" {f=1} END {exit !f}'; then
+        _diag_line OK "Модуль ядра amneziawg загружен"; ok=$((ok+1))
+    else
+        _diag_line FAIL "Модуль ядра amneziawg НЕ загружен"
+        echo "        Fix: sudo bash $0 repair-module"
+        fail=$((fail+1))
+    fi
+
+    # 2. Service active
+    if systemctl is-active --quiet awg-quick@awg0 2>/dev/null; then
+        _diag_line OK "Сервис awg-quick@awg0 активен"; ok=$((ok+1))
+    else
+        _diag_line FAIL "Сервис awg-quick@awg0 НЕактивен"
+        echo "        Fix: sudo systemctl start awg-quick@awg0"
+        fail=$((fail+1))
+    fi
+
+    # 3. Interface awg0 UP
+    if ip link show awg0 2>/dev/null | grep -qE "state (UP|UNKNOWN)"; then
+        local awg_ip
+        awg_ip=$(ip -4 -o addr show awg0 2>/dev/null | awk '{print $4; exit}')
+        _diag_line OK "Интерфейс awg0 UP (${awg_ip:-?})"; ok=$((ok+1))
+    else
+        _diag_line FAIL "Интерфейс awg0 не UP (или не существует)"
+        fail=$((fail+1))
+    fi
+
+    # 4. sysctl ip_forward
+    local fwd
+    fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "?")
+    if [[ "$fwd" == "1" ]]; then
+        _diag_line OK "sysctl net.ipv4.ip_forward=1"; ok=$((ok+1))
+    else
+        _diag_line FAIL "sysctl net.ipv4.ip_forward=$fwd (требуется 1)"
+        echo "        Fix: echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.d/99-awg.conf && sudo sysctl --system"
+        fail=$((fail+1))
+    fi
+
+    # 5. BBR congestion control (recommended, not required)
+    local cc
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
+    if [[ "$cc" == "bbr" ]]; then
+        _diag_line OK "sysctl tcp_congestion_control=bbr"; ok=$((ok+1))
+    else
+        _diag_line WARN "sysctl tcp_congestion_control=$cc (рекомендуется bbr)"
+        warn=$((warn+1))
+    fi
+
+    # 6. UFW state + AWG port
+    # shellcheck source=/dev/null
+    safe_load_config "$CONFIG_FILE" 2>/dev/null
+    local awg_port="${AWG_PORT:-39743}"
+    if command -v ufw &>/dev/null; then
+        local ufw_st
+        ufw_st=$(ufw status 2>/dev/null | head -1)
+        if [[ "$ufw_st" == "Status: active" ]]; then
+            if ufw status 2>/dev/null | grep -qE "^${awg_port}/udp[[:space:]]+ALLOW"; then
+                _diag_line OK "UFW active, ${awg_port}/udp ALLOW"; ok=$((ok+1))
+            else
+                _diag_line WARN "UFW active, но ${awg_port}/udp не в ALLOW (трафик может не приходить)"
+                warn=$((warn+1))
+            fi
+        else
+            _diag_line WARN "UFW не active ($ufw_st)"; warn=$((warn+1))
+        fi
+    else
+        _diag_line WARN "ufw не установлен"; warn=$((warn+1))
+    fi
+
+    # 7. Peer count
+    local peer_count
+    peer_count=$(awg show awg0 peers 2>/dev/null | wc -l)
+    _diag_line INFO "Peers сконфигурировано: $peer_count"
+
+    # 8. AWG params snapshot
+    local jc jmin jmax i1
+    jc=$(awg show awg0 2>/dev/null   | awk '/^[[:space:]]*jc:/   {print $2; exit}')
+    jmin=$(awg show awg0 2>/dev/null | awk '/^[[:space:]]*jmin:/ {print $2; exit}')
+    jmax=$(awg show awg0 2>/dev/null | awk '/^[[:space:]]*jmax:/ {print $2; exit}')
+    i1=$(awg show awg0 2>/dev/null   | awk -F': ' '/^[[:space:]]*i1:/ {print $2; exit}')
+    _diag_line INFO "AWG params: Jc=${jc:-?} Jmin=${jmin:-?} Jmax=${jmax:-?} I1=${i1:-absent}"
+
+    # 9. Carrier comparison
+    if [[ -n "$carrier" ]]; then
+        echo ""
+        log "Сравнение с профилем оператора '$carrier'..."
+        local row
+        row=$(_diagnose_carrier_known "$carrier")
+        # row: jc_min jc_max jmin_lo jmin_hi jmax_off_lo jmax_off_hi i1_mode
+        local rc_jc_min rc_jc_max rc_jmin_lo rc_jmin_hi rc_jmax_off_lo rc_jmax_off_hi rc_i1
+        read -r rc_jc_min rc_jc_max rc_jmin_lo rc_jmin_hi rc_jmax_off_lo rc_jmax_off_hi rc_i1 <<<"$row"
+
+        # Jc range check
+        if [[ -n "$jc" && "$jc" =~ ^[0-9]+$ && "$jc" -ge "$rc_jc_min" && "$jc" -le "$rc_jc_max" ]]; then
+            _diag_line OK "Jc=$jc в диапазоне [$rc_jc_min..$rc_jc_max] для $carrier"; ok=$((ok+1))
+        else
+            _diag_line WARN "Jc=${jc:-?} вне рекомендуемого [$rc_jc_min..$rc_jc_max] для $carrier"
+            warn=$((warn+1))
+        fi
+
+        # Jmin range check
+        if [[ -n "$jmin" && "$jmin" =~ ^[0-9]+$ && "$jmin" -ge "$rc_jmin_lo" && "$jmin" -le "$rc_jmin_hi" ]]; then
+            _diag_line OK "Jmin=$jmin в диапазоне [$rc_jmin_lo..$rc_jmin_hi] для $carrier"; ok=$((ok+1))
+        else
+            _diag_line WARN "Jmin=${jmin:-?} вне рекомендуемого [$rc_jmin_lo..$rc_jmin_hi] для $carrier"
+            warn=$((warn+1))
+        fi
+
+        # Jmax offset check (Jmax should be in [Jmin+off_lo, Jmin+off_hi])
+        if [[ -n "$jmax" && -n "$jmin" && "$jmax" =~ ^[0-9]+$ && "$jmin" =~ ^[0-9]+$ ]]; then
+            local jmax_off=$((jmax - jmin))
+            if [[ "$jmax_off" -ge "$rc_jmax_off_lo" && "$jmax_off" -le "$rc_jmax_off_hi" ]]; then
+                _diag_line OK "Jmax-Jmin=$jmax_off в диапазоне [$rc_jmax_off_lo..$rc_jmax_off_hi]"; ok=$((ok+1))
+            else
+                _diag_line WARN "Jmax-Jmin=$jmax_off вне [$rc_jmax_off_lo..$rc_jmax_off_hi] (для $carrier меньше Jmax часто стабильнее)"
+                warn=$((warn+1))
+            fi
+        else
+            _diag_line WARN "Jmax-Jmin не удалось вычислить (Jmax=${jmax:-?}, Jmin=${jmin:-?})"
+            warn=$((warn+1))
+        fi
+
+        # I1 mode check
+        case "$rc_i1" in
+            absent)
+                if [[ -z "$i1" || "$i1" == "absent" ]]; then
+                    _diag_line OK "I1 отсутствует (требуется для $carrier)"; ok=$((ok+1))
+                else
+                    _diag_line WARN "I1=$i1, но $carrier требует I1=absent"
+                    echo "        Fix: отредактировать /etc/amnezia/amneziawg/awg0.conf, удалить строку 'I1 = ...', sudo systemctl restart awg-quick@awg0"
+                    warn=$((warn+1))
+                fi
+                ;;
+            random)
+                if [[ -n "$i1" && "$i1" =~ ^\<r\ [0-9]+\>$ ]]; then
+                    _diag_line OK "I1 random ($i1) - подходит для $carrier"; ok=$((ok+1))
+                elif [[ -z "$i1" ]]; then
+                    _diag_line WARN "I1 отсутствует, $carrier обычно работает с I1 random (<r N>)"
+                    warn=$((warn+1))
+                else
+                    _diag_line WARN "I1=$i1 нестандартный формат (для $carrier обычно <r N>)"
+                    warn=$((warn+1))
+                fi
+                ;;
+            binary)
+                if [[ -n "$i1" && "$i1" =~ ^\<r\ [0-9]+\>\<b\ 0x[0-9A-Fa-f]+\> ]]; then
+                    _diag_line OK "I1 binary ($i1) - подходит для $carrier"; ok=$((ok+1))
+                else
+                    _diag_line WARN "I1=${i1:-absent}, $carrier (T-Mobile MO) требует binary I1 (<r N><b 0xHEX>)"
+                    warn=$((warn+1))
+                fi
+                ;;
+        esac
+    fi
+
+    # Summary
+    echo ""
+    log "Итого: OK=$ok WARN=$warn FAIL=$fail"
+    if [[ "$fail" -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# ==============================================================================
 # Список клиентов
 # ==============================================================================
 
@@ -1112,6 +1332,10 @@ usage() {
     echo "  --apply-mode=РЕЖИМ    syncconf (умолч.) или restart (обход kernel panic)"
     echo "  --psk                 (только для add) сгенерировать PresharedKey для клиента"
     echo "  --yes                 Не спрашивать подтверждение (эквивалент ENV AWG_YES=1)"
+    echo "  --carrier=NAME        (только для diagnose) сравнить AWG-параметры с профилем оператора"
+    echo "                        Доступные: beeline_msk yota_msk tele2_msk tele2_krasnoyarsk"
+    echo "                                   tattelecom megafon_regions tmobile_us"
+    echo "                        Exit code: 1 только при FAIL или неизвестном операторе (WARN -> 0)"
     echo ""
     echo "Команды:"
     echo "  add <имя> [имя2 ...]        Добавить клиента(ов). --expires применяется ко всем"
@@ -1123,6 +1347,7 @@ usage() {
     echo "  backup                Создать бэкап"
     echo "  restore [файл]        Восстановить из бэкапа"
     echo "  check | status        Проверить состояние сервера"
+    echo "  diagnose [--carrier=N] Self-troubleshooting: kernel/sysctl/UFW + сравнение с оператором"
     echo "  show                  Показать статус \`awg show\`"
     echo "  restart               Перезапустить сервис AmneziaWG"
     echo "  repair-module         Восстановить модуль ядра после kernel upgrade"
@@ -1384,6 +1609,10 @@ case $COMMAND in
             log_error "Не удалось восстановить модуль ядра. См. лог выше; при необходимости выполните ручное восстановление."
             _cmd_rc=1
         fi
+        ;;
+
+    diagnose)
+        diagnose_server || _cmd_rc=1
         ;;
 
     help)

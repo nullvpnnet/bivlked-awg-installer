@@ -15,7 +15,7 @@ fi
 
 # --- Safe mode and Constants ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.13.0"
+SCRIPT_VERSION="5.14.0"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -26,6 +26,7 @@ LOG_FILE="$AWG_DIR/manage_amneziawg.log"
 NO_COLOR=0
 VERBOSE_LIST=0
 JSON_OUTPUT=0
+CLI_CARRIER=""
 EXPIRES_DURATION=""
 
 # --- Auto-cleanup of temporary files and directories ---
@@ -67,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --apply-mode=*)    _CLI_APPLY_MODE="${1#*=}"; export AWG_APPLY_MODE="$_CLI_APPLY_MODE"; shift ;;
         --psk)             CLI_ADD_PSK=1; shift ;;
         --yes)             CLI_YES=1; shift ;;
+        --carrier=*)       CLI_CARRIER="${1#*=}"; shift ;;
         --*)               echo "Unknown option: $1" >&2; COMMAND="help"; break ;;
         *)
             if [[ -z "$COMMAND" ]]; then
@@ -851,6 +853,223 @@ check_server() {
 }
 
 # ==============================================================================
+# Diagnose: self-troubleshooting with optional carrier comparison
+# ==============================================================================
+
+# Known carriers and recommended AWG params.
+# Format: jc_min jc_max jmin_lo jmin_hi jmax_offset_lo jmax_offset_hi i1_mode
+#   i1_mode: random ("<r N>" form), absent (no I1), binary ("<r N><b 0xHEX>" form)
+# Source: ADVANCED.en.md operator matrix (only confirmed ✅ rows).
+# Megafon Moscow in the table is still 🔄 testing (Jc=3, Jmin=80, Jmax=268) -
+# the range is wider than mobile preset; will add once the operator is
+# confirmed and the range is fixed. T-Mobile MO US - Discussion #45 (o2me).
+_diagnose_carrier_known() {
+    case "$1" in
+        beeline_msk)            echo "3 6 40 89 50 250 random" ;;
+        yota_msk|tele2_msk|tattelecom) echo "3 3 30 50 20 80 random" ;;
+        tele2_krasnoyarsk|megafon_regions) echo "3 3 30 50 20 80 absent" ;;
+        tmobile_us)             echo "6 6 10 10 40 40 binary" ;;
+        *)                       return 1 ;;
+    esac
+}
+
+_diagnose_carrier_list() {
+    echo "beeline_msk yota_msk tele2_msk tele2_krasnoyarsk tattelecom megafon_regions tmobile_us"
+}
+
+# Print one result line with color
+_diag_line() {
+    local status="$1" msg="$2"
+    local color_start="" color_end=""
+    if [[ "$NO_COLOR" -eq 0 ]]; then
+        color_end="\033[0m"
+        case "$status" in
+            OK)   color_start="\033[0;32m" ;;
+            WARN) color_start="\033[0;33m" ;;
+            FAIL) color_start="\033[0;31m" ;;
+            INFO) color_start="\033[0;36m" ;;
+        esac
+    fi
+    printf "%b[%-4s]%b %s\n" "$color_start" "$status" "$color_end" "$msg"
+}
+
+# Main: runs health-checks + optional carrier comparison
+diagnose_server() {
+    local carrier="${CLI_CARRIER}"
+    local ok=0 warn=0 fail=0
+
+    log "AmneziaWG 2.0 server diagnostics..."
+    if [[ -n "$carrier" ]] && ! _diagnose_carrier_known "$carrier" >/dev/null; then
+        log_error "Unknown carrier: '$carrier'"
+        log_error "Supported: $(_diagnose_carrier_list)"
+        return 1
+    fi
+
+    # 1. Kernel module
+    if lsmod 2>/dev/null | awk '$1 == "amneziawg" {f=1} END {exit !f}'; then
+        _diag_line OK "Kernel module amneziawg loaded"; ok=$((ok+1))
+    else
+        _diag_line FAIL "Kernel module amneziawg NOT loaded"
+        echo "        Fix: sudo bash $0 repair-module"
+        fail=$((fail+1))
+    fi
+
+    # 2. Service active
+    if systemctl is-active --quiet awg-quick@awg0 2>/dev/null; then
+        _diag_line OK "Service awg-quick@awg0 is active"; ok=$((ok+1))
+    else
+        _diag_line FAIL "Service awg-quick@awg0 is INACTIVE"
+        echo "        Fix: sudo systemctl start awg-quick@awg0"
+        fail=$((fail+1))
+    fi
+
+    # 3. Interface awg0 UP
+    if ip link show awg0 2>/dev/null | grep -qE "state (UP|UNKNOWN)"; then
+        local awg_ip
+        awg_ip=$(ip -4 -o addr show awg0 2>/dev/null | awk '{print $4; exit}')
+        _diag_line OK "Interface awg0 UP (${awg_ip:-?})"; ok=$((ok+1))
+    else
+        _diag_line FAIL "Interface awg0 not UP (or missing)"
+        fail=$((fail+1))
+    fi
+
+    # 4. sysctl ip_forward
+    local fwd
+    fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "?")
+    if [[ "$fwd" == "1" ]]; then
+        _diag_line OK "sysctl net.ipv4.ip_forward=1"; ok=$((ok+1))
+    else
+        _diag_line FAIL "sysctl net.ipv4.ip_forward=$fwd (1 required)"
+        echo "        Fix: echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.d/99-awg.conf && sudo sysctl --system"
+        fail=$((fail+1))
+    fi
+
+    # 5. BBR congestion control (recommended, not required)
+    local cc
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
+    if [[ "$cc" == "bbr" ]]; then
+        _diag_line OK "sysctl tcp_congestion_control=bbr"; ok=$((ok+1))
+    else
+        _diag_line WARN "sysctl tcp_congestion_control=$cc (bbr recommended)"
+        warn=$((warn+1))
+    fi
+
+    # 6. UFW state + AWG port
+    # shellcheck source=/dev/null
+    safe_load_config "$CONFIG_FILE" 2>/dev/null
+    local awg_port="${AWG_PORT:-39743}"
+    if command -v ufw &>/dev/null; then
+        local ufw_st
+        ufw_st=$(ufw status 2>/dev/null | head -1)
+        if [[ "$ufw_st" == "Status: active" ]]; then
+            if ufw status 2>/dev/null | grep -qE "^${awg_port}/udp[[:space:]]+ALLOW"; then
+                _diag_line OK "UFW active, ${awg_port}/udp ALLOW"; ok=$((ok+1))
+            else
+                _diag_line WARN "UFW active, but ${awg_port}/udp not explicitly ALLOW (traffic may not arrive)"
+                warn=$((warn+1))
+            fi
+        else
+            _diag_line WARN "UFW not active ($ufw_st)"; warn=$((warn+1))
+        fi
+    else
+        _diag_line WARN "ufw is not installed"; warn=$((warn+1))
+    fi
+
+    # 7. Peer count
+    local peer_count
+    peer_count=$(awg show awg0 peers 2>/dev/null | wc -l)
+    _diag_line INFO "Peers configured: $peer_count"
+
+    # 8. AWG params snapshot
+    local jc jmin jmax i1
+    jc=$(awg show awg0 2>/dev/null   | awk '/^[[:space:]]*jc:/   {print $2; exit}')
+    jmin=$(awg show awg0 2>/dev/null | awk '/^[[:space:]]*jmin:/ {print $2; exit}')
+    jmax=$(awg show awg0 2>/dev/null | awk '/^[[:space:]]*jmax:/ {print $2; exit}')
+    i1=$(awg show awg0 2>/dev/null   | awk -F': ' '/^[[:space:]]*i1:/ {print $2; exit}')
+    _diag_line INFO "AWG params: Jc=${jc:-?} Jmin=${jmin:-?} Jmax=${jmax:-?} I1=${i1:-absent}"
+
+    # 9. Carrier comparison
+    if [[ -n "$carrier" ]]; then
+        echo ""
+        log "Comparing against carrier profile '$carrier'..."
+        local row
+        row=$(_diagnose_carrier_known "$carrier")
+        local rc_jc_min rc_jc_max rc_jmin_lo rc_jmin_hi rc_jmax_off_lo rc_jmax_off_hi rc_i1
+        read -r rc_jc_min rc_jc_max rc_jmin_lo rc_jmin_hi rc_jmax_off_lo rc_jmax_off_hi rc_i1 <<<"$row"
+
+        # Jc range check
+        if [[ -n "$jc" && "$jc" =~ ^[0-9]+$ && "$jc" -ge "$rc_jc_min" && "$jc" -le "$rc_jc_max" ]]; then
+            _diag_line OK "Jc=$jc within [$rc_jc_min..$rc_jc_max] for $carrier"; ok=$((ok+1))
+        else
+            _diag_line WARN "Jc=${jc:-?} outside recommended [$rc_jc_min..$rc_jc_max] for $carrier"
+            warn=$((warn+1))
+        fi
+
+        # Jmin range check
+        if [[ -n "$jmin" && "$jmin" =~ ^[0-9]+$ && "$jmin" -ge "$rc_jmin_lo" && "$jmin" -le "$rc_jmin_hi" ]]; then
+            _diag_line OK "Jmin=$jmin within [$rc_jmin_lo..$rc_jmin_hi] for $carrier"; ok=$((ok+1))
+        else
+            _diag_line WARN "Jmin=${jmin:-?} outside recommended [$rc_jmin_lo..$rc_jmin_hi] for $carrier"
+            warn=$((warn+1))
+        fi
+
+        # Jmax offset check
+        if [[ -n "$jmax" && -n "$jmin" && "$jmax" =~ ^[0-9]+$ && "$jmin" =~ ^[0-9]+$ ]]; then
+            local jmax_off=$((jmax - jmin))
+            if [[ "$jmax_off" -ge "$rc_jmax_off_lo" && "$jmax_off" -le "$rc_jmax_off_hi" ]]; then
+                _diag_line OK "Jmax-Jmin=$jmax_off within [$rc_jmax_off_lo..$rc_jmax_off_hi]"; ok=$((ok+1))
+            else
+                _diag_line WARN "Jmax-Jmin=$jmax_off outside [$rc_jmax_off_lo..$rc_jmax_off_hi] (lower Jmax often more stable for $carrier)"
+                warn=$((warn+1))
+            fi
+        else
+            _diag_line WARN "Jmax-Jmin could not be computed (Jmax=${jmax:-?}, Jmin=${jmin:-?})"
+            warn=$((warn+1))
+        fi
+
+        # I1 mode check
+        case "$rc_i1" in
+            absent)
+                if [[ -z "$i1" || "$i1" == "absent" ]]; then
+                    _diag_line OK "I1 absent (required for $carrier)"; ok=$((ok+1))
+                else
+                    _diag_line WARN "I1=$i1 but $carrier requires I1=absent"
+                    echo "        Fix: edit /etc/amnezia/amneziawg/awg0.conf, remove 'I1 = ...' line, sudo systemctl restart awg-quick@awg0"
+                    warn=$((warn+1))
+                fi
+                ;;
+            random)
+                if [[ -n "$i1" && "$i1" =~ ^\<r\ [0-9]+\>$ ]]; then
+                    _diag_line OK "I1 random ($i1) - suitable for $carrier"; ok=$((ok+1))
+                elif [[ -z "$i1" ]]; then
+                    _diag_line WARN "I1 missing, $carrier usually works with random I1 (<r N>)"
+                    warn=$((warn+1))
+                else
+                    _diag_line WARN "I1=$i1 unusual format (for $carrier <r N> is typical)"
+                    warn=$((warn+1))
+                fi
+                ;;
+            binary)
+                if [[ -n "$i1" && "$i1" =~ ^\<r\ [0-9]+\>\<b\ 0x[0-9A-Fa-f]+\> ]]; then
+                    _diag_line OK "I1 binary ($i1) - suitable for $carrier"; ok=$((ok+1))
+                else
+                    _diag_line WARN "I1=${i1:-absent}, $carrier (T-Mobile MO) requires binary I1 (<r N><b 0xHEX>)"
+                    warn=$((warn+1))
+                fi
+                ;;
+        esac
+    fi
+
+    # Summary
+    echo ""
+    log "Summary: OK=$ok WARN=$warn FAIL=$fail"
+    if [[ "$fail" -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# ==============================================================================
 # Client list
 # ==============================================================================
 
@@ -1115,6 +1334,10 @@ usage() {
     echo "  --apply-mode=MODE     syncconf (default) or restart (bypass kernel panic)"
     echo "  --psk                 (add only) generate a PresharedKey for the new client"
     echo "  --yes                 Skip confirm prompts (equivalent to ENV AWG_YES=1)"
+    echo "  --carrier=NAME        (diagnose only) compare AWG params against carrier profile"
+    echo "                        Available: beeline_msk yota_msk tele2_msk tele2_krasnoyarsk"
+    echo "                                   tattelecom megafon_regions tmobile_us"
+    echo "                        Exit code: 1 only on FAIL or unknown carrier (WARN -> 0)"
     echo ""
     echo "Commands:"
     echo "  add <name> [name2 ...]       Add client(s). --expires applies to all"
@@ -1126,6 +1349,7 @@ usage() {
     echo "  backup                Create a backup"
     echo "  restore [file]        Restore from backup"
     echo "  check | status        Check server status"
+    echo "  diagnose [--carrier=N] Self-troubleshooting: kernel/sysctl/UFW + carrier comparison"
     echo "  show                  Show \`awg show\` status"
     echo "  restart               Restart AmneziaWG service"
     echo "  repair-module         Repair the kernel module after a kernel upgrade"
@@ -1387,6 +1611,10 @@ case $COMMAND in
             log_error "Could not repair the kernel module. See log above; manual recovery may be required."
             _cmd_rc=1
         fi
+        ;;
+
+    diagnose)
+        diagnose_server || _cmd_rc=1
         ;;
 
     help)

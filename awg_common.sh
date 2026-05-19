@@ -56,7 +56,16 @@ get_main_nic() {
     ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}'
 }
 
-# Определение внешнего IP-адреса сервера (с кэшированием)
+# Определение внешнего IP-адреса сервера (с кэшированием).
+#
+# Список 6 сервисов покрывает основные NAT и cloud-сценарии без
+# жёсткого ранжирования по uptime: ifconfig.me исторически стабилен
+# на обычных VPS (Hetzner, Vultr, OVH), checkip.amazonaws.com -
+# доступен даже из AWS / GCP / OCI private subnet за NAT Gateway,
+# ipinfo.io / icanhazip / ifconfig.io - дополнительные fallback'и
+# на случай rate-limit одного из endpoint'ов. Порядок alphabetical
+# (детерминирован для тестов и diff'ов). First-wins: при первом
+# валидном ответе остальные не запрашиваются.
 _CACHED_PUBLIC_IP=""
 get_server_public_ip() {
     if [[ -n "$_CACHED_PUBLIC_IP" ]]; then
@@ -64,14 +73,33 @@ get_server_public_ip() {
         return 0
     fi
     local ip="" svc
-    for svc in https://ifconfig.me https://api.ipify.org https://icanhazip.com https://ipinfo.io/ip; do
+    for svc in \
+        https://api.ipify.org \
+        https://checkip.amazonaws.com \
+        https://icanhazip.com \
+        https://ifconfig.io \
+        https://ifconfig.me \
+        https://ipinfo.io/ip
+    do
         ip=$(curl -4 -sf --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')
         if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             _CACHED_PUBLIC_IP="$ip"
+            # Observability: write trace to LOG_FILE directly. Never to stdout
+            # (the function's stdout IS the IP; any extra bytes corrupt the
+            # caller's $(get_server_public_ip) capture and the generated
+            # client Endpoint line).
+            if [[ -n "${LOG_FILE:-}" && -w "$(dirname "${LOG_FILE}")" ]]; then
+                printf '[%s] DEBUG: public IP detected: %s (via %s)\n' \
+                    "$(date +'%F %T')" "$ip" "$svc" >>"$LOG_FILE" 2>/dev/null || true
+            fi
             echo "$ip"
             return 0
         fi
     done
+    if [[ -n "${LOG_FILE:-}" && -w "$(dirname "${LOG_FILE}")" ]]; then
+        printf '[%s] DEBUG: public IP detection failed (all 6 services unreachable or invalid)\n' \
+            "$(date +'%F %T')" >>"$LOG_FILE" 2>/dev/null || true
+    fi
     echo ""
     return 1
 }
