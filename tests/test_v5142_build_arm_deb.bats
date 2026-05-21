@@ -11,6 +11,9 @@
 # Otherwise: 0 candidates → fail (unchanged); 1 candidate → use it (unchanged);
 # 2+ candidates → fail with explicit list, ask caller to set KERNEL_VERSION.
 
+# Required for `run !` flag (used in negation tests). Suppresses bats BW02 warning.
+bats_require_minimum_version 1.5.0
+
 setup() {
     TEST_DIR=$(mktemp -d)
     MODULES_ROOT="$TEST_DIR/lib/modules"
@@ -102,6 +105,9 @@ teardown() {
 
 @test "_resolve_kernel_version: empty KERNEL_VERSION falls back to auto-detect" {
     mkdir -p "$MODULES_ROOT/6.12.5-rpi/build"
+    # The helper reads KERNEL_VERSION via ${KERNEL_VERSION:-}, shellcheck cannot
+    # see that cross-function flow and flags this as unused (SC2034).
+    # shellcheck disable=SC2034
     KERNEL_VERSION=""
 
     run _resolve_kernel_version "$MODULES_ROOT"
@@ -127,7 +133,9 @@ teardown() {
 @test "structural: main body uses _resolve_kernel_version (no inline detection loop)" {
     local FILE="$BATS_TEST_DIRNAME/../scripts/build-arm-deb.sh"
     # Inline pre-fix pattern: bare `for _d in /lib/modules/*/build; do`.
-    ! grep -qE '^for _d in /lib/modules/\*/build' "$FILE"
+    # In Bats a bare `! grep` does NOT fail the test (SC2314); use `run !`
+    # (bats >= 1.5.0) so the negated exit status actually fails the test.
+    run ! grep -qE '^for _d in /lib/modules/\*/build' "$FILE"
     # New invocation: KERNEL_VERSION="$(_resolve_kernel_version /lib/modules)" somewhere.
     grep -qE 'KERNEL_VERSION="\$\(_resolve_kernel_version /lib/modules\)"' "$FILE"
 }
