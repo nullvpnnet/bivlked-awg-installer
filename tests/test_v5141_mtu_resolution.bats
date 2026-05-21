@@ -12,6 +12,9 @@
 
 load test_helper
 
+# Required for `run !` flag (used in negation tests). Suppresses bats BW02 warning.
+bats_require_minimum_version 1.5.0
+
 setup() {
     TEST_DIR=$(mktemp -d)
     export AWG_DIR="$TEST_DIR"
@@ -159,8 +162,10 @@ CONF
     local FILE="${BATS_TEST_DIRNAME}/../awg_common.sh"
     local block
     block=$(awk '/^render_client_config\(\) \{/,/^}$/' "$FILE")
-    # Must NOT contain literal "MTU = 1280" hardcode
-    ! grep -qE '^MTU = 1280$' <<<"$block"
+    # Must NOT contain literal "MTU = 1280" hardcode.
+    # In Bats a bare `! grep` does NOT fail the test (SC2314); use `run !`
+    # (bats >= 1.5.0) so the negated exit status actually fails the test.
+    run ! grep -qE '^MTU = 1280$' <<<"$block"
     # Must contain template substitution for MTU
     grep -qE 'MTU = \$\{mtu\}' <<<"$block"
 }
@@ -169,7 +174,7 @@ CONF
     local FILE="${BATS_TEST_DIRNAME}/../awg_common_en.sh"
     local block
     block=$(awk '/^render_client_config\(\) \{/,/^}$/' "$FILE")
-    ! grep -qE '^MTU = 1280$' <<<"$block"
+    run ! grep -qE '^MTU = 1280$' <<<"$block"
     grep -qE 'MTU = \$\{mtu\}' <<<"$block"
 }
 
