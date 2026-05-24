@@ -8,15 +8,15 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.14.3
-# Дата: 2026-05-21
+# Версия: 5.14.4
+# Дата: 2026-05-24
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.14.3"
+SCRIPT_VERSION="5.14.4"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="49431b8a20f38d1063ca0907cedd7c92d3a0dfdc67c7151aced6f235cc276e28"
-MANAGE_SCRIPT_SHA256="6e5258a70ef3abcddd2756cb6617c7d95d89b05d8519741c62311f80be07500c"
+COMMON_SCRIPT_SHA256="518a827a1467acd6ef6cfd6531e09a803f8e604bb283eb1f85156b0396838bbb"
+MANAGE_SCRIPT_SHA256="a2cb19b14a494033db3205539f8f3f0c107b5fe44e40635c98d88ff74c530b27"
 
 # Флаги CLI
 UNINSTALL=0; HELP=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0
@@ -1257,8 +1257,9 @@ setup_improved_firewall() {
             log "Автоматическое включение UFW (--yes)."
         fi
         if ! [[ "$confirm_ufw" =~ ^[Yy]$ ]]; then
-            log_warn "UFW не включен."
-            return 1
+            log_warn "UFW настроен, но не активирован по вашему выбору."
+            log_warn "Сервер работает БЕЗ фаервола. Включить позже: sudo ufw enable"
+            return 0
         fi
         if ! ufw enable <<< "y"; then die "Ошибка включения UFW."; fi
         log "UFW включен."

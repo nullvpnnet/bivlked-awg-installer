@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 installation and configuration script for Ubuntu/Debian servers
 # Author: @bivlked
-# Version: 5.14.3
-# Date: 2026-05-21
+# Version: 5.14.4
+# Date: 2026-05-24
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 set -o pipefail
-SCRIPT_VERSION="5.14.3"
+SCRIPT_VERSION="5.14.4"
 
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Verified in step5_download_scripts() after curl.
 # Verification is skipped when AWG_BRANCH is overridden (test branch).
 # Format: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="340ba7c4cce3be8f65b19273bcec63c11ee8a9c164629b2d35b31d45ffe9e0a8"
-MANAGE_SCRIPT_SHA256="434bff68618447d877a65c93b23bb9782f01329c943e8255a0a0acb1bc4b911a"
+COMMON_SCRIPT_SHA256="36c6c8253973e751b50815276ec66f57bf0a5696906225d6a3d7183e740dbbae"
+MANAGE_SCRIPT_SHA256="403ed49484c212264dc3be91623de6099e4bc03b8be67e3963bdd0b15529365c"
 
 # CLI flags
 UNINSTALL=0; HELP=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0
@@ -1261,8 +1261,9 @@ setup_improved_firewall() {
             log "Auto-enabling UFW (--yes)."
         fi
         if ! [[ "$confirm_ufw" =~ ^[Yy]$ ]]; then
-            log_warn "UFW not enabled."
-            return 1
+            log_warn "UFW configured but not activated by your choice."
+            log_warn "The server is running WITHOUT a firewall. Enable later: sudo ufw enable"
+            return 0
         fi
         if ! ufw enable <<< "y"; then die "UFW enable error."; fi
         log "UFW enabled."

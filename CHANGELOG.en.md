@@ -14,6 +14,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [5.14.4] - 2026-05-24
+
+**v5.14.4** - small installer refinement: declining UFW activation during an interactive install (answering `N` to "Enable UFW?") now correctly continues the installation. A minor user-choice handling improvement, no architectural changes. Support matrix unchanged: Ubuntu 24.04 / 25.10 / 26.04, Debian 12 / 13, x86_64 + ARM.
+
+### Highlights
+
+- 🔧 **Declining UFW now continues the install correctly** in `install_amneziawg.sh`. As observed by @jay0x on Ubuntu 24.04 ([#89](https://github.com/bivlked/amneziawg-installer/issues/89)): answering `N` to the interactive "Enable UFW?" prompt stopped the installer instead of continuing. Adjusted the decline handling: the UFW rules stay configured (deny incoming, SSH rate limit, VPN port allow, routing) but the firewall is not activated, the install proceeds, and a hint is logged that the server is running without a firewall, along with the command to enable it later (`sudo ufw enable`). With the `--yes` flag the behaviour is unchanged - UFW is enabled automatically. Affects only the interactive path where the user declines the firewall themselves.
+
+### Tests
+
+- New file `tests/test_v5144_ufw_optional.bats` (6 tests): declining UFW continues the install and does not call `ufw enable`; accepting enables UFW; `--yes` mode enables automatically without reading input; structural parity between the RU and EN branches.
+
+---
+
 ## [5.14.3] - 2026-05-21
 
 **v5.14.3** - patch release with one fix: `cleanup_system()` no longer calls `apt-get autoremove` after purging `cloud-init`, which on clean Ubuntu 26.04 server in VirtualBox (subiquity, no cloud-init network management) could remove `netplan-generator` as a transitive dependency and leave the server unable to obtain an IP via DHCP after reboot. No architectural changes. Support matrix unchanged: Ubuntu 24.04 / 25.10 / 26.04, Debian 12 / 13, x86_64 + ARM.
