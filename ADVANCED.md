@@ -699,13 +699,16 @@ sudo systemctl restart awg-quick@awg0</pre>
   <tr><td>Таттелеком (Летай)</td><td>Jc=3, I1=&lt;r 64&gt;</td><td><code>--preset=mobile</code></td><td>✅</td></tr>
   <tr><td>Yota (Москва)</td><td>I1=&lt;b 0xce...&gt;, Jmax=261</td><td><code>--preset=mobile</code></td><td>✅</td></tr>
   <tr><td>Yota/Tele2 (Москва)</td><td>Jc=3, Jmin=40, Jmax=70</td><td><code>--preset=mobile</code></td><td>✅</td></tr>
-  <tr><td>Tele2 (Красноярск)</td><td>Jc=3, <b>I1=отсутствует</b></td><td><code>--preset=mobile</code> + удалить <code>I1</code></td><td>✅</td></tr>
+  <tr><td>Tele2 (Красноярск)</td><td>ранее I1=отсутствует; май 2026: I1=&lt;r 48&gt;</td><td><code>--preset=mobile</code>; в майскую волну I1=&lt;r 48&gt;</td><td>✅</td></tr>
+  <tr><td>МТС (Приморье)</td><td>Jc=3, I1=&lt;r 48&gt; (май 2026)</td><td><code>--preset=mobile</code> + I1=&lt;r 48&gt;</td><td>✅</td></tr>
   <tr><td>Beeline</td><td>дефолт</td><td><code>--preset=default</code></td><td>✅</td></tr>
   <tr><td>Megafon (Москва)</td><td>Jc=3, Jmin=80, Jmax=268</td><td><code>--preset=mobile</code></td><td>🔄 тестируется</td></tr>
   <tr><td>Megafon (регионы)</td><td><b>I1=отсутствует</b></td><td><code>--preset=mobile</code> + удалить <code>I1</code></td><td>✅</td></tr>
   </table>
   <br>
   <b>«I1=отсутствует»</b> означает: в <code>/etc/amnezia/amneziawg/awg0.conf</code> и в клиентских <code>.conf</code> удалить строку <code>I1 = ...</code> целиком (не оставлять пустую). Это AWG 1.0 fallback — без CPS-маскировки, но handshake проходит DPI у некоторых региональных операторов, где CPS-пакеты сами триггерят блок (Issue <a href="https://github.com/bivlked/amneziawg-installer/issues/42">#42</a>, @alkorrnd). После правки на сервере: <code>sudo systemctl restart awg-quick@awg0</code>. На клиентах — <code>sudo bash /root/awg/manage_amneziawg.sh regen &lt;имя&gt;</code> для каждого, и раздать новые конфиги.
+  <br>
+  <b>Обновление, май 2026:</b> в майскую волну блокировок вариант <code>I1=отсутствует</code> на Tele2 (Красноярск) перестал срабатывать, а короткий <code>I1 = &lt;r 48&gt;</code> прошёл DPI. То же сработало на МТС (Приморье). Похоже, для этих операторов важен размер I1: меньшее значение <code>&lt;r 48&gt;</code> менее заметно для DPI. Если <code>--preset=mobile</code> или <code>I1=отсутствует</code> не помогают - попробуйте <code>I1 = &lt;r 48&gt;</code>. Профиль <code>diagnose --carrier=tele2_krasnoyarsk</code> пока отражает прежнее <code>I1=отсутствует</code> (Issue #42), так что для майской волны задайте <code>I1 = &lt;r 48&gt;</code> вручную (Discussion <a href="https://github.com/bivlked/amneziawg-installer/discussions/38">#38</a>, @alkorrnd + @etotent).
 </details>
 
 <details>
