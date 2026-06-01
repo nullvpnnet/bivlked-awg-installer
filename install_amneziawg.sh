@@ -8,15 +8,15 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.14.5
-# Дата: 2026-05-25
+# Версия: 5.15.0
+# Дата: 2026-06-01
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.14.5"
+SCRIPT_VERSION="5.15.0"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="62523c41a8f210396bfe8bcee6483e83873b9278deefab89dc62910aa4f3cfa3"
-MANAGE_SCRIPT_SHA256="48ae3fdcfc0fdcd4999a520056738046db6f06858962d4cadcaa0d012a6d2dfa"
+COMMON_SCRIPT_SHA256="3aad0993439f746fa0780f974026e0238b4d3b4587c8303e784d08385e15eac3"
+MANAGE_SCRIPT_SHA256="64453fc8d32dc21939ce6bf85b64c243685c97f10a100d889b3422d3bbe19481"
 
 # Флаги CLI
 UNINSTALL=0; HELP=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0
@@ -42,6 +42,7 @@ FORCE_REINSTALL=0
 _APT_UPDATED=0
 CLI_PORT=""; CLI_SUBNET=""; CLI_DISABLE_IPV6="default"; CLI_SSH_PORT=""
 CLI_ROUTING_MODE="default"; CLI_CUSTOM_ROUTES=""; CLI_ENDPOINT=""; CLI_NO_TWEAKS=0
+CLI_ALLOW_IPV6_TUNNEL=0
 
 # --- Автоочистка временных файлов ---
 _install_temp_files=()
@@ -64,8 +65,9 @@ while [[ $# -gt 0 ]]; do
         --port=*)        CLI_PORT="${1#*=}" ;;
         --ssh-port=*)    CLI_SSH_PORT="${1#*=}" ;;
         --subnet=*)      CLI_SUBNET="${1#*=}" ;;
-        --allow-ipv6)    CLI_DISABLE_IPV6=0 ;;
-        --disallow-ipv6) CLI_DISABLE_IPV6=1 ;;
+        --allow-ipv6)        CLI_DISABLE_IPV6=0 ;;
+        --disallow-ipv6)     CLI_DISABLE_IPV6=1 ;;
+        --allow-ipv6-tunnel) CLI_ALLOW_IPV6_TUNNEL=1 ;;
         --route-all)     CLI_ROUTING_MODE=1 ;;
         --route-amnezia) CLI_ROUTING_MODE=2 ;;
         --route-custom=*) CLI_ROUTING_MODE=3; CLI_CUSTOM_ROUTES="${1#*=}" ;;
@@ -262,6 +264,7 @@ show_help() {
   --subnet=ПОДСЕТЬ      Установить подсеть туннеля (x.x.x.x/yy) неинтерактивно
   --allow-ipv6          Оставить IPv6 включенным неинтерактивно
   --disallow-ipv6       Принудительно отключить IPv6 неинтерактивно
+  --allow-ipv6-tunnel   Включить dual-stack IPv6 внутри туннеля (ULA, opt-in)
   --route-all           Использовать режим 'Весь трафик' неинтерактивно
   --route-amnezia       Использовать режим 'Amnezia' неинтерактивно
   --route-custom=СЕТИ   Использовать режим 'Пользовательский' неинтерактивно
@@ -506,6 +509,36 @@ configure_ipv6() {
     log "Отключение IPv6: $(if [ "$DISABLE_IPV6" -eq 1 ]; then echo 'Да'; else echo 'Нет'; fi)"
 }
 
+# Определение наличия native IPv6 на VPS.
+# Глобальный scope IPv6 (не link-local fe80::) означает выход в IPv6-интернет.
+# Эхо 1 если найден global IPv6, иначе 0.
+detect_native_ipv6() {
+    if ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+configure_ipv6_tunnel() {
+    if [[ "$CLI_ALLOW_IPV6_TUNNEL" -eq 1 ]]; then
+        ALLOW_IPV6_TUNNEL=1
+    elif [[ -z "${ALLOW_IPV6_TUNNEL:-}" ]]; then
+        ALLOW_IPV6_TUNNEL=0
+    fi
+    : "${IPV6_SUBNET:=fddd:2c4:2c4:2c4::/64}"
+    # Native IPv6 определяю при каждом запуске (кэширую в init для client render Phase 4).
+    SERVER_HAS_NATIVE_IPV6=$(detect_native_ipv6)
+    if [[ "$ALLOW_IPV6_TUNNEL" -eq 1 && "$DISABLE_IPV6" -eq 1 ]]; then
+        log_warn "--allow-ipv6-tunnel requires host IPv6 forwarding; overriding --disallow-ipv6 (DISABLE_IPV6=0)"
+        DISABLE_IPV6=0
+    fi
+    if [[ "$ALLOW_IPV6_TUNNEL" -eq 1 && "$SERVER_HAS_NATIVE_IPV6" -eq 0 ]]; then
+        log_warn "Native IPv6 не обнаружен на VPS - туннель IPv6 будет работать peer-to-peer без выхода в IPv6-интернет."
+    fi
+    export ALLOW_IPV6_TUNNEL IPV6_SUBNET SERVER_HAS_NATIVE_IPV6 DISABLE_IPV6
+}
+
 # Безопасная загрузка конфигурации (whitelist-парсер, без source/eval)
 safe_load_config() {
     local config_file="${1:-$CONFIG_FILE}"
@@ -535,7 +568,8 @@ safe_load_config() {
                 OS_ID|OS_VERSION|OS_CODENAME|AWG_PORT|AWG_TUNNEL_SUBNET|\
                 DISABLE_IPV6|ALLOWED_IPS_MODE|ALLOWED_IPS|AWG_ENDPOINT|AWG_MTU|\
                 AWG_Jc|AWG_Jmin|AWG_Jmax|AWG_S1|AWG_S2|AWG_S3|AWG_S4|\
-                AWG_H1|AWG_H2|AWG_H3|AWG_H4|AWG_I1|AWG_PRESET|NO_TWEAKS|AWG_APPLY_MODE)
+                AWG_H1|AWG_H2|AWG_H3|AWG_H4|AWG_I1|AWG_PRESET|NO_TWEAKS|\
+                AWG_APPLY_MODE|ALLOW_IPV6_TUNNEL|IPV6_SUBNET|SERVER_HAS_NATIVE_IPV6)
                     export "$key=$value"
                     ;;
             esac
@@ -1834,6 +1868,7 @@ initialize_setup() {
 
     # Значения по умолчанию
     if [[ "$DISABLE_IPV6" == "default" ]]; then DISABLE_IPV6=1; fi
+    configure_ipv6_tunnel
     if [[ "$ALLOWED_IPS_MODE" == "default" ]]; then ALLOWED_IPS_MODE=2; fi
     if [[ -z "$ALLOWED_IPS" ]]; then configure_routing_mode; fi
 
@@ -1887,6 +1922,9 @@ export AWG_I1='${AWG_I1}'
 export AWG_PRESET='${AWG_PRESET:-default}'
 export NO_TWEAKS=${NO_TWEAKS}
 export AWG_APPLY_MODE='${AWG_APPLY_MODE:-syncconf}'
+export ALLOW_IPV6_TUNNEL=${ALLOW_IPV6_TUNNEL:-0}
+export IPV6_SUBNET='${IPV6_SUBNET}'
+export SERVER_HAS_NATIVE_IPV6=${SERVER_HAS_NATIVE_IPV6:-0}
 EOF
     if ! mv "$temp_conf" "$CONFIG_FILE"; then
         rm -f "$temp_conf"
