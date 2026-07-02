@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 installation and configuration script for Ubuntu/Debian servers
 # Author: @bivlked
-# Version: 5.18.2
-# Date: 2026-07-01
+# Version: 5.18.3
+# Date: 2026-07-02
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 set -o pipefail
-SCRIPT_VERSION="5.18.2"
+SCRIPT_VERSION="5.18.3"
 
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Verified in step5_download_scripts() after curl.
 # Verification is skipped when AWG_BRANCH is overridden (test branch).
 # Format: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="5eb2ee4552400b3925e0813f478cd16142affdd59e0c595f27b0322d2603bb1d"
-MANAGE_SCRIPT_SHA256="2b9ad2fd54a74ba171202f6222986adba858408fa848c4a2a70a1a40f506c9b9"
+COMMON_SCRIPT_SHA256="16447ff4985a30c90bbf326752468fea3eaa340bbf4e5f68ff2903f163d4a03c"
+MANAGE_SCRIPT_SHA256="12b1a0967058067316ae7ebf41258ee727999d49246ef40966533b76a3ababe6"
 
 # CLI flags
 UNINSTALL=0; HELP=0; HELP_EXIT_RC=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0
@@ -366,7 +366,7 @@ request_reboot() {
     else
         log "Auto-confirming reboot (--yes)."
     fi
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    if [[ "$confirm" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then
         log "Reboot initiated..."
         sleep 5
         if ! reboot; then die "Reboot command failed."; fi
@@ -421,7 +421,7 @@ check_os_version() {
         log_warn "Detected $OS_ID $OS_VERSION ($OS_CODENAME). Script tested on Ubuntu 24.04/25.10/26.04 and Debian 12/13."
         if [[ "$AUTO_YES" -eq 0 ]]; then
             read -rp "Continue? [y/N]: " confirm < /dev/tty
-            if ! [[ "$confirm" =~ ^[Yy]$ ]]; then die "Cancelled."; fi
+            if ! [[ "$confirm" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then die "Cancelled."; fi
         else
             log "Continuing on $OS_ID $OS_VERSION (--yes)."
         fi
@@ -441,7 +441,7 @@ check_free_space() {
         log_warn "Available $avail MB. Recommended >= $req MB."
         if [[ "$AUTO_YES" -eq 0 ]]; then
             read -rp "Continue? [y/N]: " confirm < /dev/tty
-            if ! [[ "$confirm" =~ ^[Yy]$ ]]; then die "Cancelled."; fi
+            if ! [[ "$confirm" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then die "Cancelled."; fi
         else
             log "Continuing with $avail MB (--yes)."
         fi
@@ -1487,12 +1487,12 @@ setup_improved_firewall() {
         else
             log "Auto-enabling UFW (--yes)."
         fi
-        if ! [[ "$confirm_ufw" =~ ^[Yy]$ ]]; then
+        if ! [[ "$confirm_ufw" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then
             log_warn "UFW configured but not activated by your choice."
             log_warn "The server is running WITHOUT a firewall. Enable later: sudo ufw enable"
             return 0
         fi
-        if ! ufw enable <<< "y"; then die "UFW enable error."; fi
+        if ! ufw --force enable; then die "UFW enable error."; fi
         log "UFW enabled."
         # Marker: UFW was enabled by our installer (not by the user beforehand).
         # Used in step_uninstall to decide whether disabling UFW is safe.
@@ -1759,7 +1759,7 @@ step_uninstall() {
     else
         log "Auto-confirming uninstall (--yes)."
     fi
-    if [[ -z "$backup" || "$backup" =~ ^[Yy]$ ]]; then
+    if [[ -z "$backup" || "$backup" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then
         local bf
         bf="$HOME/awg_uninstall_backup_$(date +%F_%H-%M-%S).tar.gz"
         log "Creating backup: $bf"

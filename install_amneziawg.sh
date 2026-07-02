@@ -8,15 +8,15 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.18.2
-# Дата: 2026-07-01
+# Версия: 5.18.3
+# Дата: 2026-07-02
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.18.2"
+SCRIPT_VERSION="5.18.3"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="b7f87a57fbb85eed6d69be38145bdcd1ffccebb0eb5f79224d4f894fcce0fd67"
-MANAGE_SCRIPT_SHA256="692d166ff6f99d9edbb70935733a110242fff5175f4bf48aea697df757671622"
+COMMON_SCRIPT_SHA256="1a5f0817afabc8948dce66c05acdd6539b935aeef82852f50a59e2f28e489f59"
+MANAGE_SCRIPT_SHA256="9f1d4c43066c93c1456fd71b787947e6a1acfee0809a83eb54588c2dc6c7ef95"
 
 # Флаги CLI
 UNINSTALL=0; HELP=0; HELP_EXIT_RC=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0
@@ -361,7 +361,7 @@ request_reboot() {
     else
         log "Автоматическое подтверждение перезагрузки (--yes)."
     fi
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    if [[ "$confirm" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then
         log "Инициирована перезагрузка..."
         sleep 5
         if ! reboot; then die "Команда reboot не удалась."; fi
@@ -416,7 +416,7 @@ check_os_version() {
         log_warn "Обнаружена $OS_ID $OS_VERSION ($OS_CODENAME). Скрипт протестирован на Ubuntu 24.04/25.10/26.04 и Debian 12/13."
         if [[ "$AUTO_YES" -eq 0 ]]; then
             read -rp "Продолжить? [y/N]: " confirm < /dev/tty
-            if ! [[ "$confirm" =~ ^[Yy]$ ]]; then die "Отмена."; fi
+            if ! [[ "$confirm" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then die "Отмена."; fi
         else
             log "Продолжаем на $OS_ID $OS_VERSION (--yes)."
         fi
@@ -436,7 +436,7 @@ check_free_space() {
         log_warn "Доступно $avail МБ. Рекомендуется >= $req МБ."
         if [[ "$AUTO_YES" -eq 0 ]]; then
             read -rp "Продолжить? [y/N]: " confirm < /dev/tty
-            if ! [[ "$confirm" =~ ^[Yy]$ ]]; then die "Отмена."; fi
+            if ! [[ "$confirm" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then die "Отмена."; fi
         else
             log "Продолжаем с $avail МБ (--yes)."
         fi
@@ -1481,12 +1481,12 @@ setup_improved_firewall() {
         else
             log "Автоматическое включение UFW (--yes)."
         fi
-        if ! [[ "$confirm_ufw" =~ ^[Yy]$ ]]; then
+        if ! [[ "$confirm_ufw" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then
             log_warn "UFW настроен, но не активирован по вашему выбору."
             log_warn "Сервер работает БЕЗ фаервола. Включить позже: sudo ufw enable"
             return 0
         fi
-        if ! ufw enable <<< "y"; then die "Ошибка включения UFW."; fi
+        if ! ufw --force enable; then die "Ошибка включения UFW."; fi
         log "UFW включен."
         # Маркер: UFW был включён нашим установщиком (а не пользователем заранее).
         # Используется в step_uninstall чтобы решить, безопасно ли отключать UFW.
@@ -1753,7 +1753,7 @@ step_uninstall() {
     else
         log "Автоматическое подтверждение деинсталляции (--yes)."
     fi
-    if [[ -z "$backup" || "$backup" =~ ^[Yy]$ ]]; then
+    if [[ -z "$backup" || "$backup" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then
         local bf
         bf="$HOME/awg_uninstall_backup_$(date +%F_%H-%M-%S).tar.gz"
         log "Создание бэкапа: $bf"

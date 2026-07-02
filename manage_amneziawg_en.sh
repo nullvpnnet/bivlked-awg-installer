@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 peer management script
 # Author: @bivlked
-# Version: 5.18.2
-# Date: 2026-07-01
+# Version: 5.18.3
+# Date: 2026-07-02
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.18.2"
+SCRIPT_VERSION="5.18.3"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -186,7 +186,8 @@ confirm_action() {
     if ! is_interactive; then return 0; fi
     local action="$1" subject="$2"
     read -rp "Are you sure you want to $action $subject? [y/N]: " confirm < /dev/tty
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    # Accept y/yes (case-insensitive) plus stray whitespace/CR around it.
+    if [[ "$confirm" =~ ^[[:space:]]*[Yy]([Ee][Ss])?[[:space:]]*$ ]]; then
         return 0
     else
         log "Action cancelled."
