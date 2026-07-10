@@ -12,6 +12,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [5.19.0] - 2026-07-11
+
+**v5.19.0** - full CIDR /16-/30 tunnel subnets (contributed by @ekuraev), a `--no-cps` switch for the macOS desktop client, and more robust network-interface detection.
+
+### Added
+
+- **Full CIDR for the tunnel subnet.** `--subnet` and the interactive prompt now accept /16-/30 masks (previously /24 only). The server address is the first host (network+1); input is in network or network+1 form. The `10.9.9.1/24` default and existing installs are unaffected. The IPv6 tunnel maps clients by host offset (no collisions on masks wider than /24).
+- **Subnet-change guard.** A reinstall (`--force`) with a different tunnel subnet aborts when awg0.conf already contains peers: their addresses were issued in the old subnet (old IPv4s can fall outside the new range, IPv6 suffixes can collide). Remove the clients or run `--uninstall` and reinstall from scratch before changing the subnet. When peers exist but the Address line is unreadable, the install also aborts (fail-closed).
+- **IPv6-only host warning.** When the server has no IPv4 egress (no default IPv4 route and no global IPv4 on the interface), the installer warns that IPv4 client traffic will not leave the host: the tunnel is IPv4 and NATed via MASQUERADE, so a host with an IPv4 address (dual-stack) or NAT64 is required. Does not block the install (#166)
+- **`--no-cps` flag (disable CPS for the desktop AmneziaVPN on macOS).** Drops the I1 parameter from the server config and clients: the desktop AmneziaVPN app on macOS does not support CPS yet and hangs on connect (mobile and CLI clients are unaffected). The rest of the obfuscation (Jc/S1-S4/H1-H4) is kept. On a reinstall `--force --no-cps` drops I1 without touching the other parameters; re-enable CPS with a reinstall using `--preset`/`--jc`/`--jmin`/`--jmax`. After disabling on a live server, reissue clients with `manage regen` (#159)
+
+### Fixed
+
+- Network-interface detection no longer aborts the install on hosts where the `1.1.1.1` probe returns no interface - the provider blocks or null-routes that address, policy-routing, or IPv6-only egress (seen on Ubuntu 26.04 / Timeweb). `get_main_nic` now tries a chain: `ip route get`, the default IPv4 route, the first global-IPv4 interface, the default IPv6 route; on total failure it prints the available interfaces and a hint. The interface can be set manually with `AWG_MAIN_NIC=<iface>` (an invalid value is now rejected with a log warning instead of silently). The interface fallback skips tunnel and virtual interfaces (awg0/wg*/docker0/br-* etc.) - otherwise a reinstall on an IPv6-only host could NAT into the tunnel itself. Previously step 6 aborted with "Failed to detect network interface" (#166)
+- The vpn:// QR is now generated with `-8` (single 8-bit byte mode). Large configs with I1-I5/CPS parameters failed with "Input data too large" even though the data itself (the URI is around 2929 bytes) fit the QR capacity: qrencode's optimizer split the base64 into alternating segments and the mode-switch overhead pushed the stream past the v40-L limit (2953 bytes). If a config still does not fit a single QR, the error now suggests importing the vpn:// from the `.vpnuri` file manually
+
+### Documentation
+
+- New ADVANCED section "Connecting a Linux machine as a client": installing the AmneziaWG module and tools or userspace `amneziawg-go`, bringing it up with `awg-quick`, and a warning about losing SSH on a full tunnel to a remote machine (#165)
+- ADVANCED FAQ: why the AmneziaVPN client says "this server does not support split tunneling" and how to enable the feature (full tunnel `0.0.0.0/0, ::/0`, no docker needed)
+
 ---
 
 ## [5.18.4] - 2026-07-06
@@ -1500,6 +1521,7 @@ Major security and reliability update after several consecutive code audits. The
 - Full uninstall (`--uninstall`).
 
 [Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v5.18.3...HEAD
+[5.19.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.18.4...v5.19.0
 [5.18.4]: https://github.com/bivlked/amneziawg-installer/compare/v5.18.3...v5.18.4
 [5.18.3]: https://github.com/bivlked/amneziawg-installer/compare/v5.18.2...v5.18.3
 [5.18.2]: https://github.com/bivlked/amneziawg-installer/compare/v5.18.1...v5.18.2

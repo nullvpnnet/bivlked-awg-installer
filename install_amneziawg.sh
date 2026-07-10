@@ -8,15 +8,15 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.18.4
-# Дата: 2026-07-06
+# Версия: 5.19.0
+# Дата: 2026-07-11
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.18.4"
+SCRIPT_VERSION="5.19.0"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -33,15 +33,15 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="17f7161902010e97cc8881b98c274141000a1de7a46fabd2fa24be55ed88410b"
-MANAGE_SCRIPT_SHA256="4ba519911f706693c5ea1b88e1b9789502c8ea4b4195d53245b4929b0463b814"
+COMMON_SCRIPT_SHA256="1d716f62a9149801ad08d4c4a1259128d2154b01bebe8a0ccf4b739787286b22"
+MANAGE_SCRIPT_SHA256="557984d110bd417000cf3b8c25cee3b847a6a9a90abc43dff00059772ec7e89c"
 
 # Флаги CLI
-UNINSTALL=0; HELP=0; HELP_EXIT_RC=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0
+UNINSTALL=0; HELP=0; HELP_EXIT_RC=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0; NO_CPS=0
 FORCE_REINSTALL=0
 _APT_UPDATED=0
 CLI_PORT=""; CLI_SUBNET=""; CLI_DISABLE_IPV6="default"; CLI_SSH_PORT=""
-CLI_ROUTING_MODE="default"; CLI_CUSTOM_ROUTES=""; CLI_ENDPOINT=""; CLI_NO_TWEAKS=0
+CLI_ROUTING_MODE="default"; CLI_CUSTOM_ROUTES=""; CLI_ENDPOINT=""; CLI_NO_TWEAKS=0; CLI_NO_CPS=0
 CLI_ALLOW_IPV6_TUNNEL=0
 
 # --- Автоочистка временных файлов ---
@@ -88,6 +88,7 @@ while [[ $# -gt 0 ]]; do
         --endpoint=*)    CLI_ENDPOINT="${1#*=}" ;;
         --yes|-y)        AUTO_YES=1 ;;
         --no-tweaks)     NO_TWEAKS=1; CLI_NO_TWEAKS=1 ;;
+        --no-cps)        NO_CPS=1; CLI_NO_CPS=1 ;;
         --force|-f)      FORCE_REINSTALL=1 ;;
         --preset=*)      CLI_PRESET="${1#*=}" ;;
         --jc=*)          CLI_JC="${1#*=}" ;;
@@ -279,7 +280,7 @@ show_help() {
   --ssh-port=ПОРТ       SSH-порт для правила UFW (по умолчанию определяется
                         автоматически; список через запятую). Используйте, если
                         SSH на нестандартном порту и автодетект недоступен
-  --subnet=ПОДСЕТЬ      Подсеть туннеля, только /24 (напр. 10.9.9.1/24) неинтерактивно
+  --subnet=ПОДСЕТЬ      Подсеть туннеля, CIDR /16-/30 (напр. 10.9.0.0/16) неинтерактивно
   --allow-ipv6          Оставить IPv6 включенным неинтерактивно
   --disallow-ipv6       Принудительно отключить IPv6 неинтерактивно
   --allow-ipv6-tunnel   Включить dual-stack IPv6 внутри туннеля (ULA, opt-in)
@@ -298,6 +299,8 @@ show_help() {
   --jc=N               Задать Jc вручную (1-128, поверх preset)
   --jmin=N             Задать Jmin вручную (0-1280, поверх preset)
   --jmax=N             Задать Jmax вручную (0-1280, поверх preset, должно быть >= Jmin)
+  --no-cps              Отключить CPS (параметр I1) - нужно, если десктопный
+                        AmneziaVPN на macOS виснет при подключении (issue #159)
 
 Примеры:
   sudo bash install_amneziawg.sh                             # Интерактивная установка
@@ -616,7 +619,7 @@ safe_load_config() {
                 OS_ID|OS_VERSION|OS_CODENAME|AWG_PORT|AWG_TUNNEL_SUBNET|\
                 DISABLE_IPV6|ALLOWED_IPS_MODE|ALLOWED_IPS|AWG_ENDPOINT|AWG_MTU|\
                 AWG_Jc|AWG_Jmin|AWG_Jmax|AWG_S1|AWG_S2|AWG_S3|AWG_S4|\
-                AWG_H1|AWG_H2|AWG_H3|AWG_H4|AWG_I1|AWG_I2|AWG_I3|AWG_I4|AWG_I5|AWG_PRESET|NO_TWEAKS|\
+                AWG_H1|AWG_H2|AWG_H3|AWG_H4|AWG_I1|AWG_I2|AWG_I3|AWG_I4|AWG_I5|AWG_PRESET|NO_TWEAKS|NO_CPS|\
                 AWG_APPLY_MODE|ALLOW_IPV6_TUNNEL|IPV6_SUBNET|SERVER_HAS_NATIVE_IPV6)
                     export "$key=$value"
                     ;;
@@ -675,20 +678,54 @@ validate_port() {
 
 validate_subnet() {
     local subnet="$1" o
-    # Октеты без ведущих нулей: '010.008...' иначе трактуется как octal в [[ -gt ]]
-    # и проскакивает проверку. Диапазон считаем на чистых decimal-значениях.
-    if ! [[ "$subnet" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})/24$ ]]; then
-        die "Некорректная подсеть: '$subnet'. Поддерживается только /24."
+    # Самодостаточно (шаг 0, ДО загрузки awg_common.sh): не используем _valid_ipv4/
+    # _cidr_bounds. Октеты без ведущих нулей ('010...' иначе трактуется как octal).
+    if ! [[ "$subnet" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})/([0-9]{1,2})$ ]]; then
+        die "Некорректная подсеть: '$subnet'. Ожидается CIDR /16-/30, напр. 10.9.0.0/16."
     fi
-    for o in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do
-        (( o <= 255 )) || die "Некорректная подсеть: '$subnet'. Октет вне диапазона 0-255."
+    local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}" prefix="${BASH_REMATCH[5]}"
+    for o in "$a" "$b" "$c" "$d"; do
+        (( 10#$o <= 255 )) || die "Некорректная подсеть: '$subnet'. Октет вне диапазона 0-255."
     done
-    if [[ "${BASH_REMATCH[4]}" -eq 0 ]] || [[ "${BASH_REMATCH[4]}" -eq 255 ]]; then
-        die "Некорректная подсеть: '$subnet'. Последний октет не может быть 0 (сетевой адрес) или 255 (broadcast)."
+    (( 10#$prefix >= 16 && 10#$prefix <= 30 )) || die "Некорректная подсеть: '$subnet'. Поддерживается только маска /16-/30."
+    # Инлайн-арифметика: адрес обязан быть network или network+1.
+    local ip=$(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+    local mask=$(( (0xFFFFFFFF << (32 - 10#$prefix)) & 0xFFFFFFFF ))
+    local network=$(( ip & mask ))
+    local n1=$(( network + 1 ))
+    local srv="$(( (n1 >> 24) & 255 )).$(( (n1 >> 16) & 255 )).$(( (n1 >> 8) & 255 )).$(( n1 & 255 ))"
+    if (( ip != network && ip != n1 )); then
+        die "Некорректная подсеть: '$subnet'. Адрес сервера должен быть ${srv} (network+1) или укажите сеть."
     fi
-    if [[ "${BASH_REMATCH[4]}" -ne 1 ]]; then
-        die "Некорректная подсеть: '$subnet'. Последний октет должен быть 1 (адрес сервера в подсети)."
+    # Нормализация глобала к <network+1>/<prefix> (сервер = network+1).
+    AWG_TUNNEL_SUBNET="${srv}/${prefix}"
+}
+
+# Guard смены подсети: [Peer]-блоки переносятся при переустановке как есть
+# (render_server_config), их адреса выданы в СТАРОЙ подсети. Смена подсети
+# под живыми клиентами ломает их: старые IPv4 могут выпасть из нового
+# диапазона, а IPv6-суффиксы - столкнуться (decimal-кодировка /24 против
+# hex у не-/24 масок даёт два пира с одним ::x). Поэтому при наличии пиров
+# установка с другой подсетью прерывается (ревью PR #167). Самодостаточно
+# (шаг 0, ДО загрузки awg_common.sh). Старая подсеть - первое значение
+# Address в [Interface] awg0.conf: это нормализованный <network+1>/<prefix>,
+# а новый AWG_TUNNEL_SUBNET к моменту вызова нормализован validate_subnet -
+# строкового сравнения достаточно.
+guard_subnet_change_with_peers() {
+    [[ -f "$SERVER_CONF_FILE" ]] || return 0
+    grep -q '^\[Peer\]' "$SERVER_CONF_FILE" 2>/dev/null || return 0
+    local old_subnet
+    old_subnet=$(sed -n 's/^[[:space:]]*Address[[:space:]]*=[[:space:]]*//p' "$SERVER_CONF_FILE" 2>/dev/null \
+        | head -n1 | cut -d',' -f1 | tr -d '[:space:]')
+    if [[ -z "$old_subnet" ]]; then
+        # Пиры есть, а старую подсеть определить нельзя - fail-closed: молчаливое
+        # продолжение перерендерило бы конфиг в новой подсети и сломало клиентов.
+        die "В ${SERVER_CONF_FILE} уже есть пиры, но строка Address в [Interface] не читается - проверить смену подсети невозможно. Восстановите Address, либо удалите клиентов (sudo bash $MANAGE_SCRIPT_PATH remove <имя>), либо --uninstall и чистая установка."
     fi
+    if [[ "$old_subnet" != "$AWG_TUNNEL_SUBNET" ]]; then
+        die "Подсеть туннеля изменена (${old_subnet} -> ${AWG_TUNNEL_SUBNET}), но в ${SERVER_CONF_FILE} уже есть пиры: их адреса выданы в старой подсети, смена сломает клиентов. Варианты: оставьте прежнюю подсеть; удалите всех клиентов (sudo bash $MANAGE_SCRIPT_PATH remove <имя>); либо --uninstall и чистая установка."
+    fi
+    return 0
 }
 
 # Валидация endpoint (FQDN / IPv4 / [IPv6]).
@@ -2028,6 +2065,10 @@ initialize_setup() {
         fi
     fi
 
+    # Смена подсети при живых пирах запрещена - проверка до сохранения
+    # init-файла и любых изменений на диске (AWG_TUNNEL_SUBNET финален).
+    guard_subnet_change_with_peers
+
     # Значения по умолчанию
     if [[ "$DISABLE_IPV6" == "default" ]]; then DISABLE_IPV6=1; fi
     configure_ipv6_tunnel
@@ -2064,6 +2105,24 @@ initialize_setup() {
         generate_awg_params
     else
         log "AWG 2.0 параметры уже заданы из конфига."
+    fi
+
+    # CPS (I1) toggle (issue #159): --no-cps убирает параметр I1, из-за которого
+    # десктопный AmneziaVPN на macOS виснет при подключении (мобильные и CLI-клиенты
+    # CPS понимают). Обнуляем ТОЛЬКО I1, остальной набор обфускации (Jc/S1-S4/H1-H4)
+    # не трогаем. Явные --preset/--jc/--jmin/--jmax без --no-cps возвращают CPS
+    # (свежая генерация набора включает I1). Иначе держим состояние из init.
+    if [[ "${CLI_NO_CPS:-0}" -eq 1 ]]; then
+        NO_CPS=1
+    elif [[ -n "${CLI_PRESET:-}" || -n "${CLI_JC:-}" || -n "${CLI_JMIN:-}" || -n "${CLI_JMAX:-}" ]]; then
+        NO_CPS=0
+    fi
+    if [[ "${NO_CPS:-0}" -eq 1 ]]; then
+        if [[ -n "${AWG_I1:-}" && "$config_exists" -eq 1 ]]; then
+            log_warn "ВНИМАНИЕ: --no-cps убирает параметр I1 (CPS). Существующие клиентские конфиги с I1 перестанут подключаться - перевыпустите их: sudo bash $MANAGE_SCRIPT_PATH regen"
+        fi
+        AWG_I1=''
+        log "CPS (I1) отключён (--no-cps / сохранённый NO_CPS=1): десктопный AmneziaVPN на macOS не поддерживает CPS."
     fi
 
     # Сохранение конфигурации
@@ -2107,6 +2166,7 @@ export AWG_I4='${AWG_I4:-}'
 export AWG_I5='${AWG_I5:-}'
 export AWG_PRESET='${AWG_PRESET:-default}'
 export NO_TWEAKS=${NO_TWEAKS}
+export NO_CPS=${NO_CPS}
 export AWG_APPLY_MODE='${AWG_APPLY_MODE:-syncconf}'
 export ALLOW_IPV6_TUNNEL=${ALLOW_IPV6_TUNNEL:-0}
 export IPV6_SUBNET='${IPV6_SUBNET}'

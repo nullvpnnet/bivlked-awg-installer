@@ -3,8 +3,8 @@
 # ==============================================================================
 # Общая библиотека функций для AmneziaWG 2.0
 # Автор: @bivlked
-# Версия: 5.18.4
-# Дата: 2026-07-06
+# Версия: 5.19.0
+# Дата: 2026-07-11
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 #
@@ -163,9 +163,90 @@ _valid_host_or_ipv4() {
     return 0
 }
 
-# Определение основного сетевого интерфейса
+# --- CIDR-арифметика (общая для аллокатора IPv4/IPv6) ---
+# Чистые функции, только bash-арифметика ($(( ))), без внешних зависимостей.
+# set-e-safe: значения берём через $(( ))/local, guard'ы через "|| return".
+
+# _ipv4_to_int <a.b.c.d> : 32-битное целое из IPv4. Guard входа - _valid_ipv4
+# (не переизобретаем проверку октетов). 10# защищает от трактовки ведущего нуля
+# как восьмеричного числа.
+_ipv4_to_int() {
+    _valid_ipv4 "$1" || return 1
+    local IFS=. o
+    read -ra o <<< "$1"
+    echo $(( (10#${o[0]} << 24) | (10#${o[1]} << 16) | (10#${o[2]} << 8) | 10#${o[3]} ))
+}
+
+# _int_to_ipv4 <int> : IPv4 из 32-битного целого.
+_int_to_ipv4() {
+    local n="$1"
+    echo "$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))"
+}
+
+# _cidr_bounds <addr/prefix> : печатает "network_int broadcast_int".
+# Единственный источник формулы network/broadcast в awg_common.
+_cidr_bounds() {
+    local cidr="$1" addr prefix ip mask net bcast
+    addr="${cidr%/*}"; prefix="${cidr##*/}"
+    [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$prefix >= 0 && 10#$prefix <= 32 )) || return 1
+    ip=$(_ipv4_to_int "$addr") || return 1
+    if (( 10#$prefix == 0 )); then mask=0; else mask=$(( (0xFFFFFFFF << (32 - 10#$prefix)) & 0xFFFFFFFF )); fi
+    net=$(( ip & mask ))
+    bcast=$(( net | (0xFFFFFFFF ^ mask) ))
+    echo "$net $bcast"
+}
+
+# Определение основного сетевого интерфейса (egress).
+# Цепочка fallback, чтобы не падать на хостах, где зонд к 1.1.1.1 не отдаёт
+# интерфейс: провайдер null-route'ит/блокирует адрес, policy-routing или
+# IPv6-only egress (наблюдалось на Ubuntu 26.04 / Timeweb, issue #166).
+# Ручное переопределение: export AWG_MAIN_NIC=<iface> перед запуском.
 get_main_nic() {
-    ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}'
+    # Ручной оверрайд принимаем только если это существующий безопасный ifname:
+    # значение попадает в PostUp/PostDown (iptables -o ...), поэтому имена с
+    # shell-метасимволами и несуществующие интерфейсы отвергаем (fall-through
+    # к авто-детекту).
+    if [[ -n "${AWG_MAIN_NIC:-}" ]]; then
+        if [[ "$AWG_MAIN_NIC" =~ ^[A-Za-z0-9._-]+$ ]] \
+            && ip link show dev "$AWG_MAIN_NIC" &>/dev/null; then
+            printf '%s\n' "$AWG_MAIN_NIC"
+            return 0
+        fi
+        # Невалидный оверрайд отбрасываем ГРОМКО (log_warn идёт в stderr, вывод
+        # $() не загрязняет): молчаливый fall-through путал бы пользователя,
+        # который уже выполнил подсказку export AWG_MAIN_NIC=... с опечаткой.
+        log_warn "AWG_MAIN_NIC='${AWG_MAIN_NIC}' проигнорирован: интерфейс не найден или имя некорректно - продолжаю авто-детект."
+    fi
+    local nic
+    # 1) Реальный egress к публичному адресу (FIB-lookup, быстрый путь для большинства хостов).
+    nic=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    # 2) Дефолтный IPv4-маршрут (когда зонд недостижим/заблокирован).
+    [[ -z "$nic" ]] && nic=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    # 3) Первый UP-интерфейс с глобальным IPv4 (нет дефолт-маршрута). Исключаем
+    #    туннельные/виртуальные (awg0 сам UP с 10.x scope global при --force
+    #    переустановке, docker0/br-*/veth* на хостах с контейнерами) - иначе
+    #    NAT ушёл бы в hairpin через сам туннель, а IPv6-only warning молча
+    #    подавился бы (у awg0 есть глобальный IPv4).
+    [[ -z "$nic" ]] && nic=$(ip -o -4 addr show up scope global 2>/dev/null \
+        | awk '{sub(/@.*/,"",$2); if ($2!="lo" && $2 !~ /^(awg|wg|docker|br-|virbr|veth|lxc|tun|tap)/) { print $2; exit }}')
+    # 4) Дефолтный IPv6-маршрут (IPv6-only egress).
+    [[ -z "$nic" ]] && nic=$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    [[ -n "$nic" ]] || return 1
+    printf '%s\n' "$nic"
+}
+
+# Возвращает 0, если у хоста нет IPv4-выхода: нет дефолтного IPv4-маршрута И у
+# интерфейса $1 нет глобального IPv4-адреса. Такой хост IPv6-only (issue #166:
+# Timeweb Ubuntu 26.04) - IPv4-туннель (10.x) не сможет NAT'иться наружу.
+# Оба условия должны совпасть: на dual-stack/IPv4 хостах функция вернёт 1.
+host_lacks_ipv4_egress() {
+    local nic="$1"
+    # [[ -z $(...) ]] вместо "| grep -q .": grep -q выходит на первой строке, и
+    # под pipefail многострочный вывод ip (несколько default-маршрутов) мог бы
+    # дать SIGPIPE=141 -> ложное "маршрута нет" на здоровом dual-stack хосте.
+    [[ -z "$(ip -4 route show default 2>/dev/null)" ]] \
+        && [[ -z "$(ip -o -4 addr show dev "$nic" up scope global 2>/dev/null)" ]]
 }
 
 # Определение внешнего IP-адреса сервера (с кэшированием).
@@ -950,6 +1031,13 @@ render_server_config() {
     local peers_source="${1:-}"
     load_awg_params || return 1
 
+    # --no-cps (issue #159): load_awg_params перечитывает I1 из живого awg0.conf
+    # при переустановке. При NO_CPS=1 намеренно обнуляем I1, иначе серверный
+    # конфиг тихо восстановил бы CPS вопреки флагу.
+    if grep -qE '^[[:space:]]*(export[[:space:]]+)?NO_CPS=1' "$CONFIG_FILE" 2>/dev/null; then
+        AWG_I1=''
+    fi
+
     # Порт для НОВОГО awg0.conf берём из init-файла (намерение пользователя:
     # флаг --port или сохранённый прежний порт), а НЕ из перезаписываемого
     # старого awg0.conf. load_awg_params перечитывает ListenPort из живого
@@ -972,7 +1060,19 @@ render_server_config() {
     nic=$(get_main_nic)
     if [[ -z "$nic" ]]; then
         log_error "Не удалось определить сетевой интерфейс."
+        log_error "Укажите его вручную и перезапустите шаг 6: export AWG_MAIN_NIC=<iface>"
+        log_error "Доступные интерфейсы: $(ip -br link 2>/dev/null | awk '$1!="lo"{printf "%s ", $1}')"
         return 1
+    fi
+
+    # IPv6-only egress: интерфейс есть, но IPv4-выхода нет. Туннель на IPv4 (10.x)
+    # NAT'ится через MASQUERADE - на таком хосте IPv4-трафик клиентов наружу не
+    # пойдёт (issue #166). Предупреждаем, не блокируем: peer-to-peer внутри
+    # туннеля и IPv6-туннель (--allow-ipv6-tunnel) работают.
+    if host_lacks_ipv4_egress "$nic"; then
+        log_warn "Похоже, хост IPv6-only: у $nic нет IPv4-выхода."
+        log_warn "VPN туннелирует IPv4, поэтому IPv4-трафик клиентов наружу не пойдёт."
+        log_warn "Нужен хост с IPv4-адресом (dual-stack) или NAT64."
     fi
 
     local server_ip subnet_mask
@@ -1318,14 +1418,22 @@ apply_config() {
 # Управление пирами
 # ==============================================================================
 
-# Получить следующий свободный IP в подсети
+# Получить следующий свободный IP в подсети (произвольная маска /16-/30).
+# Сервер = network+1; диапазон хостов [network+1 .. broadcast-1]. Возвращает
+# наименьший свободный (ранний выход) - для /16 это до 65534 позиций, но без
+# полного скана в типичном случае.
 get_next_client_ip() {
-    local subnet_base
-    subnet_base=$(echo "${AWG_TUNNEL_SUBNET:-10.9.9.1/24}" | cut -d'/' -f1 | cut -d'.' -f1-3)
+    local subnet="${AWG_TUNNEL_SUBNET:-10.9.9.1/24}"
+    local net_int bcast_int
+    read -r net_int bcast_int < <(_cidr_bounds "$subnet") || {
+        log_error "get_next_client_ip: не удалось разобрать подсеть '$subnet'"
+        return 1
+    }
+    local server_int=$(( net_int + 1 ))
 
-    # Ассоциативный массив для O(1) lookup
+    # Ассоциативный массив для O(1) lookup. Сервер (network+1) занят.
     declare -A used_set
-    used_set["${subnet_base}.1"]=1
+    used_set["$(_int_to_ipv4 "$server_int")"]=1
     if [[ -f "$SERVER_CONF_FILE" ]]; then
         while IFS= read -r ip; do
             used_set["$ip"]=1
@@ -1333,23 +1441,26 @@ get_next_client_ip() {
     fi
 
     local i candidate
-    for i in $(seq 2 254); do
-        candidate="${subnet_base}.${i}"
+    for (( i = net_int + 1; i <= bcast_int - 1; i++ )); do
+        candidate=$(_int_to_ipv4 "$i")
         if [[ -z "${used_set[$candidate]+x}" ]]; then
             echo "$candidate"
             return 0
         fi
     done
 
-    log_error "Нет свободных IP в подсети ${subnet_base}.0/24"
+    log_error "Нет свободных IP в подсети ${subnet}"
     return 1
 }
 
-# Получить IPv6-адрес клиента из его IPv4 (детерминировано по последнему октету).
-# Используется только при ALLOW_IPV6_TUNNEL=1. Аллокация зеркальна IPv4:
-# клиент 10.9.9.N получает fddd:2c4:2c4:2c4::N (тот же индекс N, /128).
-# Аргумент: IPv4-адрес клиента, например 10.9.9.5 -> fddd:2c4:2c4:2c4::5
-# Возвращает строку без префикса длины (только адрес).
+# Получить IPv6-адрес клиента из его IPv4. Используется только при
+# ALLOW_IPV6_TUNNEL=1. Индекс = смещение хоста в подсети (offset = ipv4 - network),
+# что даёт уникальность при любой маске. Кодирование суффикса зависит от маски:
+#   prefix == 24 -> десятичный offset (== последний октет; байт-в-байт как ранее),
+#   иначе        -> корректный hex (printf '%x').
+# Сервер (network+1, offset 1) даёт "1" в обоих режимах -> ::1 (см.
+# _derive_ipv6_server_addr, не меняется). Клиенты имеют offset >= 2.
+# Возвращает строку без префикса длины.
 #
 # get_next_client_ipv6 <ipv4_addr>
 get_next_client_ipv6() {
@@ -1358,11 +1469,28 @@ get_next_client_ipv6() {
         log_error "get_next_client_ipv6: не передан IPv4-адрес"
         return 1
     fi
-    local n="${ipv4##*.}"
+    local tunnel="${AWG_TUNNEL_SUBNET:-10.9.9.1/24}"
+    local tprefix="${tunnel##*/}"
+    local net_int bcast_int ip_int offset suffix
+    read -r net_int bcast_int < <(_cidr_bounds "$tunnel") || {
+        log_error "get_next_client_ipv6: не удалось разобрать подсеть '$tunnel'"
+        return 1
+    }
+    ip_int=$(_ipv4_to_int "$ipv4") || {
+        log_error "get_next_client_ipv6: некорректный IPv4 '$ipv4'"
+        return 1
+    }
+    offset=$(( ip_int - net_int ))
+    (( offset >= 1 && offset < bcast_int - net_int )) || { log_error "get_next_client_ipv6: IPv4 '$ipv4' вне подсети '$tunnel'"; return 1; }
+    if [[ "$tprefix" == "24" ]]; then
+        suffix="$offset"
+    else
+        suffix=$(printf '%x' "$offset")
+    fi
     local subnet="${IPV6_SUBNET:-fddd:2c4:2c4:2c4::/64}"
     local prefix="${subnet%%::*}"
     [[ "$prefix" == *:* ]] || { log_error "get_next_client_ipv6: IPV6_SUBNET не содержит :: (значение: $subnet)"; return 1; }
-    echo "${prefix}::${n}"
+    echo "${prefix}::${suffix}"
     return 0
 }
 
@@ -1814,6 +1942,12 @@ generate_qr_vpnuri() {
     tmp_png=$(awg_mktemp "$AWG_DIR") || { log_error "Ошибка mktemp для QR vpn:// '$name'"; return 1; }
 
     # Флаги qrencode для длинных vpn:// URI с PSK (issue #72):
+    #   -8    единый 8-битный byte-режим. Без него оптимизатор qrencode дробит
+    #         base64-URI на чередующиеся alnum/byte сегменты, и overhead смены
+    #         режимов раздувает поток за ёмкость v40-L (2953 байта). Большие
+    #         конфиги с I1-I5/CPS падали с "Input data too large", хотя сами
+    #         данные под лимитом (URI ~2929 байт < 2953) - в один byte-сегмент
+    #         влезают. Репортёр: pqqsnupl (ntc.party).
     #   -s 6  размер модуля 6 пикселей вместо дефолтных 3 - это и есть основной фикс.
     #         На дефолтном масштабе модули были слишком мелкими, чтобы камера iPhone
     #         различала их при сканировании PNG с экрана компьютера - отсюда ошибка 900
@@ -1821,8 +1955,8 @@ generate_qr_vpnuri() {
     #   -l L  низший уровень коррекции ошибок - это уже дефолт qrencode, фиксируем явно
     #         для защиты от смены дефолта в будущих версиях библиотеки.
     #   -m 4  стандартная тихая зона из 4 модулей - тоже дефолт, фиксируем явно.
-    if ! qrencode -t png -l L -s 6 -m 4 -o "$tmp_png" < "$uri_file"; then
-        log_error "Ошибка генерации QR vpn:// для '$name'"
+    if ! qrencode -8 -t png -l L -s 6 -m 4 -o "$tmp_png" < "$uri_file"; then
+        log_error "Ошибка генерации QR vpn:// для '$name' (возможно, конфиг слишком велик для одного QR - импортируйте vpn:// из файла ${name}.vpnuri вручную)."
         rm -f "$tmp_png"
         return 1
     fi
@@ -2351,9 +2485,14 @@ validate_awg_config() {
         done
     fi
 
-    # I1 опционален, но рекомендован для AWG 2.0
-    if ! grep -q "^I1 = " "$SERVER_CONF_FILE"; then
-        log_warn "Параметр I1 (CPS) не найден — CPS concealment не активен"
+    # I1 опционален. Отсутствие = либо не задан, либо намеренно отключён через
+    # --no-cps (issue #159): десктопный AmneziaVPN на macOS не поддерживает CPS.
+    if ! grep -qE '^[[:space:]]*I1[[:space:]]*=' "$SERVER_CONF_FILE"; then
+        if grep -qE '^[[:space:]]*(export[[:space:]]+)?NO_CPS=1' "$CONFIG_FILE" 2>/dev/null; then
+            log "I1 (CPS) отключён намеренно (--no-cps) - ожидаемо для десктопного AmneziaVPN на macOS"
+        else
+            log_warn "Параметр I1 (CPS) не найден - CPS concealment не активен"
+        fi
     fi
 
     if [[ $ok -eq 1 ]]; then

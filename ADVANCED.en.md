@@ -46,6 +46,7 @@ This is a supplement to the main [README.en.md](README.en.md), containing deeper
 - [📋 AWG 2.0 Client Compatibility](#client-compat-adv)
 - [🐧 Debian Support](#debian-support-adv)
 - [🔧 Raspberry Pi and ARM64 Support](#arm-support-adv)
+- [🐧 Connecting a Linux machine as a client](#linux-client-adv)
 - [📦 LXC / Docker via amneziawg-go (userspace)](#lxc-userspace-adv)
 - [⚠️ Known Limitations](#limitations-adv)
 - [🤝 Contributing](#contributing-adv)
@@ -439,7 +440,7 @@ Options:
   --no-color            Disable colored output
   --port=PORT           Set UDP port (1024-65535)
   --ssh-port=PORT       SSH port for the UFW rule (auto-detected; comma-separated list)
-  --subnet=SUBNET       Tunnel subnet, /24 only (e.g. 10.9.9.1/24)
+  --subnet=SUBNET       Tunnel subnet, CIDR /16-/30 (e.g. 10.9.0.0/16)
   --allow-ipv6          Keep IPv6 enabled
   --disallow-ipv6       Force-disable IPv6
   --allow-ipv6-tunnel   Enable dual-stack IPv6 inside the tunnel (ULA, opt-in)
@@ -600,7 +601,7 @@ Client keys are stored in `/root/awg/keys/` (permissions 600). Server keys are i
 The installer downloads `awg_common.sh` and `manage_amneziawg.sh` from URLs pinned to the specific version tag:
 
 ```
-https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/awg_common.sh
+https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/awg_common.sh
 ```
 
 This provides **supply chain pinning**: downloaded scripts match the installer version, even if `main` has already been updated.
@@ -620,12 +621,12 @@ To update the management and shared library scripts **without reinstalling the s
 
 ```bash
 # Russian version:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/manage_amneziawg.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/awg_common.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/manage_amneziawg.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/awg_common.sh
 
 # English version:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/manage_amneziawg_en.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/awg_common_en.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/manage_amneziawg_en.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/awg_common_en.sh
 
 # Set permissions
 chmod 700 /root/awg/manage_amneziawg.sh /root/awg/awg_common.sh
@@ -644,13 +645,23 @@ chmod 700 /root/awg/manage_amneziawg.sh /root/awg/awg_common.sh
 </details>
 
 <details>
+  <summary><strong>Q: AmneziaVPN says "this server does not support split tunneling". How do I enable it?</strong></summary>
+  <b>A:</b> This is a limitation of the client, not the server. The AmneziaVPN app's built-in split tunneling by sites and apps only turns on when the config sends all traffic through the tunnel. The client looks at <code>AllowedIPs</code>: a full tunnel unlocks the feature, while a partial subnet list is treated as already split at the routing level, so the client hides its toggle with that message. The full-tunnel form it reliably recognizes is the pair <code>0.0.0.0/0, ::/0</code>. The "Amnezia" routing mode (the default) produces a subnet list, which is why the feature is unavailable. Fix, no docker needed: switch the client to a full tunnel - replace the line in its <code>.conf</code> with <code>AllowedIPs = 0.0.0.0/0, ::/0</code> and re-import, or re-issue the client in "All traffic" mode (<code>--route-all</code>). The split tunneling page in the app then opens and you pick sites/apps there. If you only need part of the traffic in the tunnel (a network-level split), <code>AllowedIPs</code> already does that - the app feature is not required for it.
+</details>
+
+<details>
+  <summary><strong>Q: The desktop AmneziaVPN on macOS hangs on connect. What can I do?</strong></summary>
+  <b>A:</b> The desktop AmneziaVPN app on macOS does not yet support CPS (the <code>I1</code> parameter) - the newest AmneziaWG 2.0 obfuscation layer, so it hangs on connect. Mobile (iOS/Android) and CLI clients handle CPS and connect fine. Install with the <code>--no-cps</code> flag: the installer drops <code>I1</code> from the server config and all clients, and the desktop connects. Only the CPS layer is lost, the rest of the obfuscation (Jc/S1-S4/H1-H4) stays - which is exactly what worked in Russia before CPS existed. On an already-installed server it is the same via reinstall: <code>sudo bash install_amneziawg_en.sh --force --no-cps</code>, then reissue existing clients <code>sudo bash /root/awg/manage_amneziawg.sh regen</code> (without this a client that still has <code>I1</code> will not match a server without <code>I1</code>). To re-enable CPS later, reinstall with any set-regeneration flag, e.g. <code>--preset=default</code> - note that this regenerates the WHOLE obfuscation set (H1-H4/S1-S4 too), so after re-enabling you need a <code>regen</code> of all clients again. The flag drops only <code>I1</code>: if you added <code>I2</code>-<code>I5</code> manually, they stay in the configs. Issue <a href="https://github.com/bivlked/amneziawg-installer/issues/159">#159</a>.
+</details>
+
+<details>
   <summary><strong>Q: How do I change the AmneziaWG port after installation?</strong></summary>
   <b>A:</b> 1. Change <code>ListenPort</code> in <code>/etc/amnezia/amneziawg/awg0.conf</code>. 2. Change <code>AWG_PORT</code> in <code>/root/awg/awgsetup_cfg.init</code>. 3. Update UFW (<code>sudo ufw delete allow &lt;old_port&gt;/udp</code>, <code>sudo ufw allow &lt;new_port&gt;/udp</code>). 4. Restart the service (<code>sudo systemctl restart awg-quick@awg0</code>). 5. <b>Regenerate ALL client configs</b> (<code>sudo bash /root/awg/manage_amneziawg.sh regen</code>) and distribute them.
 </details>
 
 <details>
   <summary><strong>Q: How do I change the internal VPN subnet?</strong></summary>
-  <b>A:</b> The easiest way is to uninstall (<code>sudo bash ./install_amneziawg_en.sh --uninstall</code>) and reinstall, specifying the new subnet during initial setup.
+  <b>A:</b> The easiest way is to uninstall (<code>sudo bash ./install_amneziawg_en.sh --uninstall</code>) and reinstall, specifying the new subnet during initial setup. A reinstall over a live server (<code>--force</code>) with a different subnet aborts while clients exist in the config - their addresses were issued in the old subnet.
 </details>
 
 <details>
@@ -985,6 +996,19 @@ The specific case (an AWG 2.0 server with `S3`/`S4` > 0 and an old AWG 1.0 clien
 3. For port change instructions, see the FAQ "How do I change the port"
 </details>
 
+<details>
+<summary><strong>Install aborts at step 6: "Failed to detect network interface"</strong></summary>
+
+Step 6 detects the primary network interface (for NAT/MASQUERADE) via a chain: `ip route get 1.1.1.1`, the default IPv4 route, the first global-IPv4 interface, the default IPv6 route. If every method comes back empty, the provider blocks or null-routes `1.1.1.1`, policy-routing is in use, or egress is IPv6-only (seen on Ubuntu 26.04 / Timeweb).
+
+Set the interface manually and re-run the install:
+
+1. List interface names: `ip -br link` (for example `eth0`, `ens3`)
+2. Re-run the install with the interface on the same command line: `sudo AWG_MAIN_NIC=ens3 bash install_amneziawg_en.sh` - the value is picked up at step 6. A separate `export AWG_MAIN_NIC=...` + `sudo bash ...` does not work: sudo resets the environment (if you are already root, a plain `export` works)
+
+The value is validated (an existing interface with no special characters); on a typo the installer warns in the log and falls back to auto-detection.
+</details>
+
 ---
 
 <a id="stats-adv"></a>
@@ -1293,6 +1317,57 @@ Raspberry Pi 3 has 1 GB RAM and 4 cores at 1.2 GHz. Kernel module compilation ca
 <summary><strong>Q: How do I check if the prebuilt module was used?</strong></summary>
 Look for <code>Prebuilt module installed</code> in the install log (<code>/root/awg/install_amneziawg.log</code>). If DKMS was used instead, you'll see <code>dkms install</code> output.
 </details>
+
+---
+
+<a id="linux-client-adv"></a>
+## 🐧 Connecting a Linux machine as a client
+
+Mobile and desktop clients take the config through the app, a QR code, or a vpn:// URI. To connect an ordinary Linux box as a client (a home server, a second machine, a Linux router), you need the same userspace that understands AWG 2.0 obfuscation - plain `wireguard` will not do, it knows nothing about Jc/S/H/I. Two paths.
+
+### 1. Kernel module + tools (Ubuntu / Debian)
+
+On the SERVER, issue a client config and grab it:
+
+```bash
+sudo bash /root/awg/manage_amneziawg.sh add my-linux-box
+# ready config: /root/awg/my-linux-box.conf
+```
+
+On the CLIENT, install the AmneziaWG module and tools. These are the same packages the installer uses, but a client needs no UFW / Fail2Ban / server tuning:
+
+```bash
+# Ubuntu
+sudo add-apt-repository -y ppa:amnezia/ppa
+sudo apt update
+sudo apt install -y amneziawg-dkms amneziawg-tools linux-headers-$(uname -r)
+```
+
+Debian has no separate PPA packages. The installer works around this by remapping the suite to the nearest Ubuntu one (bookworm -> focal, trixie -> noble), but as a manual step on a client that is fragile - for a Debian client prefer userspace `amneziawg-go` (path 2) or build the module from source.
+
+Place the config under the name `awg0` and bring the tunnel up:
+
+```bash
+sudo mkdir -p /etc/amnezia/amneziawg
+sudo cp my-linux-box.conf /etc/amnezia/amneziawg/awg0.conf
+sudo chmod 600 /etc/amnezia/amneziawg/awg0.conf
+sudo awg-quick up awg0
+sudo systemctl enable awg-quick@awg0   # start on boot
+```
+
+Check: `sudo awg show` shows a `latest handshake` - the main sign of a live tunnel. On a full tunnel `curl ifconfig.me` returns the server IP; on a split tunnel verify with traffic to an address covered by `AllowedIPs`. Stop the tunnel with `sudo awg-quick down awg0`.
+
+### 2. amneziawg-go (userspace, no kernel module)
+
+If the module cannot be installed (no kernel headers, DKMS blocked, an exotic architecture), the userspace [`amneziawg-go`](https://github.com/amnezia-vpn/amneziawg-go) runs over `/dev/net/tun` on any Linux at the cost of ~30-50% CPU overhead. The client needs `amneziawg-go` plus `amneziawg-tools`. `awg-quick up awg0` picks up the userspace implementation if the `amneziawg-go` binary is in `PATH` (or set `WG_QUICK_USERSPACE_IMPLEMENTATION=/path/to/amneziawg-go`); it needs access to `/dev/net/tun` and `CAP_NET_ADMIN`. Building and running it is covered in [LXC / Docker via amneziawg-go](#lxc-userspace-adv).
+
+### Careful on a remote machine (risk of losing SSH)
+
+If the Linux client is a remote server you manage over SSH, a full tunnel (`AllowedIPs = 0.0.0.0/0`) pushes all traffic into the tunnel, including your return SSH: the machine starts answering over the VPN, and the current session almost certainly drops.
+
+- For a client that only needs part of its traffic in the VPN, give it a split config: `manage_amneziawg.sh modify my-linux-box AllowedIPs "the-subnets-you-need"`. SSH stays on the direct route.
+- If you do need a full tunnel, before `awg-quick up` add an exception for your admin IP via the original gateway (a policy route), otherwise you lose access to the machine.
+- Test a full tunnel on a machine with a local console or KVM/IPMI, not blind over SSH.
 
 ---
 

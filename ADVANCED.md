@@ -46,6 +46,7 @@
 - [📋 Совместимость клиентов AWG 2.0](#client-compat-adv)
 - [🐧 Поддержка Debian](#debian-support-adv)
 - [🔧 Raspberry Pi и ARM64](#arm-support-adv)
+- [🐧 Подключение Linux-машины как клиента](#linux-client-adv)
 - [📦 LXC / Docker через amneziawg-go (userspace)](#lxc-userspace-adv)
 - [⚠️ Известные ограничения](#limitations-adv)
 - [🤝 Внесение вклада (Contributing)](#contributing-adv)
@@ -437,7 +438,7 @@ PersistentKeepalive = 33
   --no-color            Отключить цветной вывод
   --port=НОМЕР          Установить UDP порт (1024-65535)
   --ssh-port=ПОРТ       SSH-порт для правила UFW (автодетект; список через запятую)
-  --subnet=ПОДСЕТЬ      Подсеть туннеля, только /24 (напр. 10.9.9.1/24)
+  --subnet=ПОДСЕТЬ      Подсеть туннеля, CIDR /16-/30 (напр. 10.9.0.0/16)
   --allow-ipv6          Оставить IPv6 включенным
   --disallow-ipv6       Принудительно отключить IPv6
   --allow-ipv6-tunnel   Включить dual-stack IPv6 внутри туннеля (ULA, opt-in)
@@ -598,7 +599,7 @@ graph TD
 Инсталлятор скачивает `awg_common.sh` и `manage_amneziawg.sh` с URL, привязанных к конкретному тегу версии:
 
 ```
-https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/awg_common.sh
+https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/awg_common.sh
 ```
 
 Это даёт **supply chain pinning**: скачиваемые скрипты соответствуют версии инсталлятора, даже если `main` уже обновлён.
@@ -618,12 +619,12 @@ AWG_BRANCH=my-feature-branch sudo bash ./install_amneziawg.sh
 
 ```bash
 # Русская версия:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/manage_amneziawg.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/awg_common.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/manage_amneziawg.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/awg_common.sh
 
 # Английская версия:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/manage_amneziawg_en.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/awg_common_en.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/manage_amneziawg_en.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.19.0/awg_common_en.sh
 
 # Установить права
 chmod 700 /root/awg/manage_amneziawg.sh /root/awg/awg_common.sh
@@ -642,13 +643,23 @@ chmod 700 /root/awg/manage_amneziawg.sh /root/awg/awg_common.sh
 </details>
 
 <details>
+  <summary><strong>В: AmneziaVPN пишет "данный сервер не поддерживает раздельное туннелирование". Как включить?</strong></summary>
+  <b>О:</b> Это ограничение самого клиента, а не сервера. Встроенное раздельное туннелирование по сайтам и приложениям в приложении AmneziaVPN включается только когда конфиг гонит в туннель весь трафик. Клиент смотрит на <code>AllowedIPs</code>: полный туннель разблокирует функцию, а частичный список подсетей клиент считает уже разделённым на уровне маршрутов и прячет свой переключатель с этой надписью. Надёжная форма полного туннеля, которую он распознаёт, - пара <code>0.0.0.0/0, ::/0</code>. Режим "Amnezia" (по умолчанию) даёт список подсетей, поэтому функция и недоступна. Решение, docker не нужен: переведите клиента на полный туннель - замените строку в его <code>.conf</code> на <code>AllowedIPs = 0.0.0.0/0, ::/0</code> и переимпортируйте, либо перевыпустите клиента в режиме "Весь трафик" (<code>--route-all</code>). После этого страница раздельного туннелирования в приложении откроется, и сайты/приложения выбираются уже там. Если же нужно просто пустить в туннель часть трафика (сплит на уровне сети), это делает сам <code>AllowedIPs</code> - отдельная функция приложения для этого не требуется.
+</details>
+
+<details>
+  <summary><strong>В: Десктопный AmneziaVPN на macOS виснет при подключении. Что делать?</strong></summary>
+  <b>О:</b> Десктопное приложение AmneziaVPN на macOS пока не поддерживает CPS (параметр <code>I1</code>) - новейший слой обфускации AmneziaWG 2.0, поэтому на подключении оно зависает. Мобильные (iOS/Android) и CLI-клиенты CPS понимают и подключаются нормально. Ставьте с флагом <code>--no-cps</code>: установщик уберёт <code>I1</code> из серверного конфига и всех клиентов, и десктоп подключится. Теряется только слой CPS, остальная обфускация (Jc/S1-S4/H1-H4) остаётся - это ровно то, что работало в России до появления CPS. На уже установленном сервере то же самое через переустановку: <code>sudo bash install_amneziawg.sh --force --no-cps</code>, затем перевыпустите существующих клиентов <code>sudo bash /root/awg/manage_amneziawg.sh regen</code> (без этого клиент с <code>I1</code> не сойдётся с сервером без <code>I1</code>). Чтобы позже вернуть CPS, переустановите с любым флагом перегенерации набора, например <code>--preset=default</code> - учтите, что это перегенерирует ВЕСЬ набор обфускации (H1-H4/S1-S4 тоже), поэтому после возврата снова нужен <code>regen</code> всех клиентов. Флаг убирает только <code>I1</code>: если вы вручную прописывали <code>I2</code>-<code>I5</code>, они останутся в конфигах. Issue <a href="https://github.com/bivlked/amneziawg-installer/issues/159">#159</a>.
+</details>
+
+<details>
   <summary><strong>В: Как изменить порт AmneziaWG после установки?</strong></summary>
   **О:** 1. Измените `ListenPort` в `/etc/amnezia/amneziawg/awg0.conf`. 2. Измените `AWG_PORT` в `/root/awg/awgsetup_cfg.init`. 3. Обновите UFW (`sudo ufw delete allow <старый_порт>/udp`, `sudo ufw allow <новый_порт>/udp`). 4. Перезапустите сервис (`sudo systemctl restart awg-quick@awg0`). 5. **Перегенерируйте конфиги ВСЕХ клиентов** (`sudo bash /root/awg/manage_amneziawg.sh regen`) и передайте их клиентам.
 </details>
 
 <details>
   <summary><strong>В: Как изменить внутреннюю подсеть VPN?</strong></summary>
-  **О:** Проще всего выполнить деинсталляцию (`sudo bash ./install_amneziawg.sh --uninstall`) и установить заново, указав новую подсеть при первом запуске.
+  **О:** Проще всего выполнить деинсталляцию (`sudo bash ./install_amneziawg.sh --uninstall`) и установить заново, указав новую подсеть при первом запуске. Переустановка поверх живого сервера (`--force`) с другой подсетью прерывается, пока в конфиге есть клиенты - их адреса выданы в старой подсети.
 </details>
 
 <details>
@@ -983,6 +994,19 @@ sudo ufw reload</pre>
 3. Для смены порта см. FAQ "Как изменить порт"
 </details>
 
+<details>
+<summary><strong>Установка обрывается на шаге 6: "Не удалось определить сетевой интерфейс"</strong></summary>
+
+Шаг 6 определяет основной сетевой интерфейс (для NAT/MASQUERADE) по цепочке: `ip route get 1.1.1.1`, дефолтный IPv4-маршрут, первый глобальный IPv4-интерфейс, дефолтный IPv6-маршрут. Если все способы вернули пусто - провайдер блокирует или null-route'ит `1.1.1.1`, используется policy-routing или egress только по IPv6 (встречалось на Ubuntu 26.04 / Timeweb).
+
+Задайте интерфейс вручную и перезапустите установку:
+
+1. Посмотрите имена интерфейсов: `ip -br link` (например `eth0`, `ens3`)
+2. Перезапустите установку, передав интерфейс в той же команде: `sudo AWG_MAIN_NIC=ens3 bash install_amneziawg.sh` - значение подхватится на шаге 6. Раздельные `export AWG_MAIN_NIC=...` + `sudo bash ...` не сработают: sudo сбрасывает окружение (если вы уже под root, обычный `export` работает)
+
+Значение проверяется (существующий интерфейс без спецсимволов); при опечатке установщик предупредит в логе и вернётся к авто-определению.
+</details>
+
 ---
 
 <a id="stats-adv"></a>
@@ -1291,6 +1315,57 @@ Raspberry Pi 3 имеет 1 ГБ RAM и 4 ядра на 1.2 ГГц. Компил
 <summary><strong>В: Как узнать, был ли использован готовый модуль?</strong></summary>
 Ищите <code>Prebuilt module installed</code> в логе установки (<code>/root/awg/install_amneziawg.log</code>). Если использовался DKMS, вы увидите вывод <code>dkms install</code>.
 </details>
+
+---
+
+<a id="linux-client-adv"></a>
+## 🐧 Подключение Linux-машины как клиента
+
+Мобильные и десктопные клиенты берут конфиг через приложение, QR или vpn:// URI. Чтобы подключить как клиента обычный Linux (домашний сервер, вторую машину, роутер на Linux), нужен тот же userspace, что понимает обфускацию AWG 2.0 - штатный `wireguard` не подойдёт, он не знает про Jc/S/H/I. Два пути.
+
+### 1. Ядерный модуль + инструменты (Ubuntu / Debian)
+
+На СЕРВЕРЕ выпустите клиентский конфиг и заберите его:
+
+```bash
+sudo bash /root/awg/manage_amneziawg.sh add my-linux-box
+# готовый конфиг: /root/awg/my-linux-box.conf
+```
+
+На КЛИЕНТЕ поставьте модуль и инструменты AmneziaWG. Это те же пакеты, что ставит установщик, но клиенту не нужны UFW / Fail2Ban / оптимизации сервера:
+
+```bash
+# Ubuntu
+sudo add-apt-repository -y ppa:amnezia/ppa
+sudo apt update
+sudo apt install -y amneziawg-dkms amneziawg-tools linux-headers-$(uname -r)
+```
+
+Для Debian отдельных пакетов PPA нет. Установщик обходит это, ремапя suite на ближайшую Ubuntu (bookworm -> focal, trixie -> noble), но как ручной шаг на клиенте это ненадёжно - для Debian-клиента проще userspace `amneziawg-go` (путь 2) или сборка модуля из исходников.
+
+Положите конфиг под именем `awg0` и поднимите туннель:
+
+```bash
+sudo mkdir -p /etc/amnezia/amneziawg
+sudo cp my-linux-box.conf /etc/amnezia/amneziawg/awg0.conf
+sudo chmod 600 /etc/amnezia/amneziawg/awg0.conf
+sudo awg-quick up awg0
+sudo systemctl enable awg-quick@awg0   # автозапуск при загрузке
+```
+
+Проверка: `sudo awg show` покажет `latest handshake` - это главный признак живого туннеля. При полном туннеле `curl ifconfig.me` вернёт IP сервера; при split-туннеле проверяйте по трафику к адресу, попадающему в `AllowedIPs`. Остановить туннель - `sudo awg-quick down awg0`.
+
+### 2. amneziawg-go (userspace, без модуля ядра)
+
+Если модуль поставить нельзя (нет заголовков ядра, запрет DKMS, экзотическая архитектура), userspace [`amneziawg-go`](https://github.com/amnezia-vpn/amneziawg-go) работает поверх `/dev/net/tun` в любом Linux ценой ~30-50% CPU overhead. Клиенту нужны `amneziawg-go` плюс `amneziawg-tools`. `awg-quick up awg0` подхватит userspace-реализацию, если бинарь `amneziawg-go` лежит в `PATH` (или задайте `WG_QUICK_USERSPACE_IMPLEMENTATION=/путь/к/amneziawg-go`); нужен доступ к `/dev/net/tun` и `CAP_NET_ADMIN`. Сборка и запуск разобраны в разделе [LXC / Docker через amneziawg-go](#lxc-userspace-adv).
+
+### Осторожно на удалённой машине (риск потерять SSH)
+
+Если Linux-клиент - это удалённый сервер, которым вы управляете по SSH, полный туннель (`AllowedIPs = 0.0.0.0/0`) заворачивает в туннель весь трафик, включая ваш обратный SSH: машина начнёт отвечать через VPN, и текущая сессия почти наверняка отвалится.
+
+- Клиенту, которому в VPN нужна лишь часть трафика, дайте split-конфиг: `manage_amneziawg.sh modify my-linux-box AllowedIPs "нужные-подсети"`. SSH останется на прямом маршруте.
+- Если полный туннель всё же нужен, перед `awg-quick up` пропишите исключение для своего админского IP через исходный шлюз (policy-route), иначе доступ к машине пропадёт.
+- Проверяйте полный туннель на машине с локальной консолью или KVM/IPMI, а не вслепую по SSH.
 
 ---
 
