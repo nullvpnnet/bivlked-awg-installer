@@ -33,7 +33,7 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="338e90cfc98ac8b61b65198aa699724725fa537b23de7a04dab7c44ac12008fa"
+COMMON_SCRIPT_SHA256="9c9728fd7965258b2569404f4e7e50eb2d1b1f0f4b91a285c0646a7931cc4446"
 MANAGE_SCRIPT_SHA256="ced685738dd4910a393cd573c550e9973a6073f3437ea8021206db18e49e64c0"
 
 # Флаги CLI
@@ -43,6 +43,7 @@ _APT_UPDATED=0
 CLI_PORT=""; CLI_SUBNET=""; CLI_DISABLE_IPV6="default"; CLI_SSH_PORT=""
 CLI_ROUTING_MODE="default"; CLI_CUSTOM_ROUTES=""; CLI_ENDPOINT=""; CLI_NO_TWEAKS=0; CLI_NO_CPS=0
 CLI_ALLOW_IPV6_TUNNEL=0
+CLI_ISOLATION="default"
 
 # --- Автоочистка временных файлов ---
 _install_temp_files=()
@@ -85,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --route-all)     CLI_ROUTING_MODE=1 ;;
         --route-amnezia) CLI_ROUTING_MODE=2 ;;
         --route-custom=*) CLI_ROUTING_MODE=3; CLI_CUSTOM_ROUTES="${1#*=}" ;;
+        --isolation=*)   CLI_ISOLATION="${1#*=}" ;;
         --endpoint=*)    CLI_ENDPOINT="${1#*=}" ;;
         --yes|-y)        AUTO_YES=1 ;;
         --no-tweaks)     NO_TWEAKS=1; CLI_NO_TWEAKS=1 ;;
@@ -287,6 +289,8 @@ show_help() {
   --route-all           Использовать режим 'Весь трафик' неинтерактивно
   --route-amnezia       Использовать режим 'Amnezia' неинтерактивно
   --route-custom=СЕТИ   Использовать режим 'Пользовательский' неинтерактивно
+  --isolation=on|off    Изоляция клиентов VPN друг от друга (по умолчанию on).
+                        off: подсеть туннеля добавляется в AllowedIPs клиентов
   --endpoint=АДРЕС      Внешний endpoint сервера: FQDN, IPv4 или [IPv6] (для NAT)
   -y, --yes             Автоматическое подтверждение (перезагрузки, UFW и т.д.)
   -f, --force           Принудительная переустановка поверх уже работающего AmneziaWG
@@ -648,7 +652,7 @@ safe_load_config() {
                 DISABLE_IPV6|ALLOWED_IPS_MODE|ALLOWED_IPS|AWG_ENDPOINT|AWG_MTU|\
                 AWG_Jc|AWG_Jmin|AWG_Jmax|AWG_S1|AWG_S2|AWG_S3|AWG_S4|\
                 AWG_H1|AWG_H2|AWG_H3|AWG_H4|AWG_I1|AWG_I2|AWG_I3|AWG_I4|AWG_I5|AWG_PRESET|NO_TWEAKS|NO_CPS|\
-                AWG_APPLY_MODE|ALLOW_IPV6_TUNNEL|IPV6_SUBNET|SERVER_HAS_NATIVE_IPV6|PREV_AWG_PORT)
+                AWG_APPLY_MODE|ALLOW_IPV6_TUNNEL|IPV6_SUBNET|SERVER_HAS_NATIVE_IPV6|PREV_AWG_PORT|CLIENT_ISOLATION|CLIENT_ISOLATION_NET)
                     export "$key=$value"
                     ;;
             esac
@@ -727,6 +731,121 @@ validate_subnet() {
     fi
     # Нормализация глобала к <network+1>/<prefix> (сервер = network+1).
     AWG_TUNNEL_SUBNET="${srv}/${prefix}"
+}
+
+# Сеть туннеля из CIDR-строки (<network+1>/<prefix> -> <network>/<prefix>).
+# Нужен изоляции клиентов (issue #178): при отключённой изоляции в AllowedIPs
+# клиентов уходит именно network-адрес. Самодостаточно (шаг 0, ДО загрузки
+# awg_common.sh): не используем _cidr_bounds/_int_to_ipv4.
+tunnel_network_cidr() {
+    local subnet="${1:-$AWG_TUNNEL_SUBNET}"
+    if ! [[ "$subnet" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})/([0-9]{1,2})$ ]]; then
+        return 1
+    fi
+    local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}" prefix="${BASH_REMATCH[5]}"
+    (( 10#$prefix <= 32 )) || return 1
+    local o
+    for o in "$a" "$b" "$c" "$d"; do (( 10#$o <= 255 )) || return 1; done
+    local ip=$(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+    local mask
+    if (( 10#$prefix == 0 )); then mask=0; else mask=$(( (0xFFFFFFFF << (32 - 10#$prefix)) & 0xFFFFFFFF )); fi
+    local net=$(( ip & mask ))
+    echo "$(( (net >> 24) & 255 )).$(( (net >> 16) & 255 )).$(( (net >> 8) & 255 )).$(( net & 255 ))/${prefix}"
+}
+
+# Явный выбор изоляции клиентов (issue #178). Приоритет:
+# CLI-флаг > сохранённый конфиг > интерактивный вопрос (только первый запуск,
+# без --yes) > 1 (изолированно). Старый конфиг без ключа = 1: до этой фичи
+# split-режимы были изолированы де-факто, поведение сохраняется.
+configure_client_isolation() {
+    case "$CLI_ISOLATION" in
+        on)  CLIENT_ISOLATION=1; log "Изоляция клиентов из CLI: включена." ;;
+        off) CLIENT_ISOLATION=0; log "Изоляция клиентов из CLI: отключена." ;;
+        default)
+            if [[ -n "${CLIENT_ISOLATION:-}" ]]; then
+                log "Изоляция клиентов (из конфига): $( [[ "$CLIENT_ISOLATION" -eq 1 ]] && echo включена || echo отключена )."
+            elif [[ "${config_exists:-0}" -eq 1 ]]; then
+                CLIENT_ISOLATION=1
+                log "Изоляция клиентов: включена (конфиг до v5.20 - прежнее поведение)."
+            elif [[ "$AUTO_YES" -eq 1 ]]; then
+                CLIENT_ISOLATION=1
+                log "Изоляция клиентов: включена (--yes, по умолчанию)."
+            else
+                local r_iso
+                read -rp "Изолировать клиентов VPN друг от друга? [Y/n]: " r_iso < /dev/tty
+                case "$r_iso" in
+                    [nN]*) CLIENT_ISOLATION=0; log "Изоляция клиентов отключена: клиенты будут видеть друг друга внутри VPN." ;;
+                    *)     CLIENT_ISOLATION=1; log "Изоляция клиентов включена." ;;
+                esac
+            fi
+            ;;
+        *) die "Некорректное значение --isolation='$CLI_ISOLATION'. Допустимо: on|off." ;;
+    esac
+    export CLIENT_ISOLATION
+}
+
+# Приводит ALLOWED_IPS в соответствие с CLIENT_ISOLATION (идемпотентно,
+# вызывается на каждом запуске после определения режима маршрутизации).
+# Изоляция ВЫКЛ: сеть туннеля дописывается в список (режимы 2/3; в режиме 1
+# 0.0.0.0/0 уже покрывает её). Изоляция ВКЛ: наш токен убирается из режима 2
+# (round-trip off->on); режим 3 не трогаем - кастомный список принадлежит
+# пользователю, а изоляцию всё равно обеспечивает DROP-правило на сервере.
+# CLIENT_ISOLATION_NET хранит ownership нашего токена (пуст, если токен
+# пользовательский или изоляция включена) - нужен, чтобы вычистить прежний
+# маршрут при смене подсети туннеля (issue #178, финальный аудит).
+_apply_isolation_to_allowed_ips() {
+    local net
+    net=$(tunnel_network_cidr "$AWG_TUNNEL_SUBNET") || return 0
+    # Убираем ВЕСЬ whitespace, не только пробелы: validate_cidr_list принимает
+    # табы как разделители, и токен с табом иначе не распознавался бы pattern-
+    # матчем ниже - задваивание вместо no-op (ревью PR #179).
+    local compact=",${ALLOWED_IPS//[[:space:]]/},"
+
+    # Смена подсети туннеля: наш прежний токен (persisted CLIENT_ISOLATION_NET)
+    # отличается от текущей сети - убираем в любом режиме и при любом состоянии
+    # изоляции: токен по конструкции добавлен нами, а не пользователем.
+    if [[ -n "${CLIENT_ISOLATION_NET:-}" && "$CLIENT_ISOLATION_NET" != "$net" ]]; then
+        if [[ "$compact" == *",${CLIENT_ISOLATION_NET},"* ]]; then
+            # Цикл, а не одиночный replace: в испорченном списке токен может
+            # встречаться несколько раз - вычищаем все копии (ревью PR #179).
+            while [[ "$compact" == *",${CLIENT_ISOLATION_NET},"* ]]; do
+                compact="${compact/,${CLIENT_ISOLATION_NET},/,}"
+            done
+            compact="${compact#,}"; compact="${compact%,}"
+            ALLOWED_IPS="${compact//,/, }"
+            log "Смена подсети туннеля: прежний маршрут ${CLIENT_ISOLATION_NET} убран из AllowedIPs клиентов."
+            compact=",${ALLOWED_IPS// /},"
+        fi
+        CLIENT_ISOLATION_NET=""
+    fi
+
+    if [[ "${CLIENT_ISOLATION:-1}" -eq 0 ]]; then
+        if [[ "$ALLOWED_IPS_MODE" == "1" ]]; then
+            CLIENT_ISOLATION_NET=""
+        elif [[ "$compact" == *",${net},"* ]]; then
+            # Уже есть: наш прежний (CLIENT_ISOLATION_NET==net сохранён) или
+            # пользовательский (CLIENT_ISOLATION_NET пуст) - ownership не меняем.
+            :
+        else
+            ALLOWED_IPS="${ALLOWED_IPS}, ${net}"
+            CLIENT_ISOLATION_NET="$net"
+            log "Изоляция отключена: подсеть туннеля ${net} добавлена в AllowedIPs клиентов."
+        fi
+    else
+        # Изоляция ВКЛ: режим 2 - токен убираем всегда (список генерируется нами);
+        # режим 3 - только если токен добавили мы (ownership в CLIENT_ISOLATION_NET).
+        if [[ "$compact" == *",${net},"* ]] \
+           && { [[ "$ALLOWED_IPS_MODE" == "2" ]] || [[ "${CLIENT_ISOLATION_NET:-}" == "$net" ]]; }; then
+            while [[ "$compact" == *",${net},"* ]]; do
+                compact="${compact/,${net},/,}"
+            done
+            compact="${compact#,}"; compact="${compact%,}"
+            ALLOWED_IPS="${compact//,/, }"
+            log "Изоляция включена: подсеть туннеля ${net} убрана из AllowedIPs клиентов."
+        fi
+        CLIENT_ISOLATION_NET=""
+    fi
+    export CLIENT_ISOLATION_NET
 }
 
 # Guard смены подсети: [Peer]-блоки переносятся при переустановке как есть
@@ -1862,6 +1981,11 @@ step_uninstall() {
     fi
     log "Остановка сервиса..."
     systemctl stop awg-quick@awg0 2>/dev/null
+    # Изоляционные DROP-правила (issue #178): PostDown конфига на диске мог
+    # уже не содержать -D DROP (прерванная переустановка on->off между шагами
+    # 6 и 7) - добираем stale-правила явно, как в шаге 7.
+    while iptables -D FORWARD -i awg0 -o awg0 -j DROP 2>/dev/null; do :; done
+    while ip6tables -D FORWARD -i awg0 -o awg0 -j DROP 2>/dev/null; do :; done
     systemctl disable awg-quick@awg0 2>/dev/null
     modprobe -r amneziawg 2>/dev/null || true
     # v5.12.0+: автовосстановление модуля при обновлении ядра.
@@ -2037,6 +2161,11 @@ initialize_setup() {
     ALLOWED_IPS_MODE="default"
     ALLOWED_IPS=""
     AWG_ENDPOINT=""
+    CLIENT_ISOLATION=""
+    # Жёсткий сброс (не ${VAR:-}): внутренний ownership-маркер не должен
+    # наследоваться из окружения - экспортированная снаружи переменная иначе
+    # дотянется до удаления маршрутов из AllowedIPs (ревью PR #179).
+    CLIENT_ISOLATION_NET=""
 
     # Загрузка конфига
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -2050,6 +2179,26 @@ initialize_setup() {
         ALLOWED_IPS_MODE=${ALLOWED_IPS_MODE:-"default"}
         ALLOWED_IPS=${ALLOWED_IPS:-""}
         AWG_ENDPOINT=${AWG_ENDPOINT:-""}
+        # CLIENT_ISOLATION из конфига: строго 0|1 (whitelist-парсер значения не
+        # проверяет, а конфиг правят руками). Иначе арифметический контекст
+        # [[ "on" -eq 1 ]] разыменует строку как пустую переменную (=0) и молча
+        # ИНВЕРТИРУЕТ security-настройку: написал on - получил off (ревью PR #179).
+        case "${CLIENT_ISOLATION:-}" in
+            ""|0|1) : ;;
+            *)
+                log_warn "CLIENT_ISOLATION='$CLIENT_ISOLATION' в $CONFIG_FILE не валиден (допустимо 0|1) - включаю изоляцию (безопасный дефолт)."
+                CLIENT_ISOLATION=1
+                ;;
+        esac
+        # CLIENT_ISOLATION_NET - внутренний ownership-маркер: ровно один
+        # канонический IPv4 CIDR (вывод tunnel_network_cidr). Мусор с запятыми
+        # в substring-замене _apply_isolation_to_allowed_ips съел бы соседние
+        # пользовательские маршруты одной заменой (ревью PR #179).
+        if [[ -n "${CLIENT_ISOLATION_NET:-}" ]] \
+           && [[ "$(tunnel_network_cidr "$CLIENT_ISOLATION_NET" || true)" != "$CLIENT_ISOLATION_NET" ]]; then
+            log_warn "CLIENT_ISOLATION_NET='$CLIENT_ISOLATION_NET' в $CONFIG_FILE не валиден (ожидается один канонический CIDR) - сбрасываю."
+            CLIENT_ISOLATION_NET=""
+        fi
         log "Настройки из файла загружены."
     else
         log "Файл конфигурации $CONFIG_FILE не найден."
@@ -2065,6 +2214,11 @@ initialize_setup() {
     PREV_AWG_PORT="${PREV_AWG_PORT:-}"
     _cfg_awg_port=""
     if [[ "$config_exists" -eq 1 ]]; then _cfg_awg_port="$AWG_PORT"; fi
+
+    # Прежнее значение изоляции - для предупреждения о смене (issue #178).
+    # Legacy-конфиг без ключа = 1 (изолированно): иначе переход legacy -> --isolation=off не даёт предупреждения о regen.
+    _cfg_client_isolation=""
+    if [[ "$config_exists" -eq 1 ]]; then _cfg_client_isolation="${CLIENT_ISOLATION:-1}"; fi
 
     # Переопределение из CLI
     AWG_PORT=${CLI_PORT:-$AWG_PORT}
@@ -2084,6 +2238,10 @@ initialize_setup() {
         # из awgsetup_cfg.init - флаг молча не действовал (Issue #170). Пустой
         # список заставит configure_routing_mode пересчитать его под новый режим.
         ALLOWED_IPS=""
+        # Ownership умирает вместе со списком, который он описывал: иначе
+        # stale CLIENT_ISOLATION_NET может присвоить себе токен пользователя
+        # из свежего --route-custom (issue #178).
+        CLIENT_ISOLATION_NET=""
         if [[ "$CLI_ROUTING_MODE" -eq 3 ]]; then ALLOWED_IPS=$CLI_CUSTOM_ROUTES; fi
     fi
     if [[ -n "$CLI_ENDPOINT" ]]; then
@@ -2150,6 +2308,12 @@ initialize_setup() {
     configure_ipv6_tunnel
     if [[ "$ALLOWED_IPS_MODE" == "default" ]]; then ALLOWED_IPS_MODE=2; fi
     if [[ -z "$ALLOWED_IPS" ]]; then configure_routing_mode; fi
+
+    # Изоляция клиентов (issue #178): выбор + приведение AllowedIPs.
+    # Вызов до validate_cidr_list ниже - дописанная подсеть проходит ту же
+    # обязательную валидацию, что и остальной список.
+    configure_client_isolation
+    _apply_isolation_to_allowed_ips
 
     # Единая обязательная валидация AllowedIPs до сохранения конфига: CLI
     # --route-custom на первом запуске присваивал ALLOWED_IPS без проверки
@@ -2221,6 +2385,8 @@ export AWG_TUNNEL_SUBNET='${AWG_TUNNEL_SUBNET}'
 export DISABLE_IPV6=${DISABLE_IPV6}
 export ALLOWED_IPS_MODE=${ALLOWED_IPS_MODE}
 export ALLOWED_IPS='${ALLOWED_IPS}'
+export CLIENT_ISOLATION=${CLIENT_ISOLATION:-1}
+export CLIENT_ISOLATION_NET='${CLIENT_ISOLATION_NET:-}'
 export AWG_ENDPOINT='${AWG_ENDPOINT}'
 export AWG_MTU=${AWG_MTU:-1280}
 # AWG 2.0 Parameters
@@ -2267,12 +2433,21 @@ EOF
     log "Подсеть: ${AWG_TUNNEL_SUBNET}"
     log "Откл. IPv6: $DISABLE_IPV6"
     log "Режим AllowedIPs: $ALLOWED_IPS_MODE"
+    log "Изоляция клиентов: $( [[ "${CLIENT_ISOLATION:-1}" -eq 1 ]] && echo включена || echo отключена )"
     # Смена режима маршрутизации - операция над клиентскими конфигами: новые
     # клиенты получат новый список, но у существующих regen сознательно
     # сохраняет AllowedIPs (индивидуальные настройки modify). Подсказываем
     # явный способ применить новый режим ко всем (Issue #170).
     if [[ "$config_exists" -eq 1 && "$CLI_ROUTING_MODE" != "default" ]]; then
         log_warn "Режим маршрутизации изменён. Существующие клиентские конфиги сохраняют старые AllowedIPs."
+        log_warn "Применить новый режим ко всем клиентам: sudo bash $MANAGE_SCRIPT_PATH regen --reset-routes"
+    fi
+    # Смена изоляции - та же операция над клиентскими конфигами, что и смена
+    # режима маршрутизации: новые клиенты получат новый список, существующие -
+    # только через regen --reset-routes (issue #178).
+    if [[ "$config_exists" -eq 1 \
+          && "$_cfg_client_isolation" != "$CLIENT_ISOLATION" ]]; then
+        log_warn "Режим изоляции клиентов изменён. Существующие клиентские конфиги сохраняют старые AllowedIPs."
         log_warn "Применить новый режим ко всем клиентам: sudo bash $MANAGE_SCRIPT_PATH regen --reset-routes"
     fi
     # Смена порта: шаг 6 пропускает уже существующих клиентов, их Endpoint
@@ -2309,6 +2484,7 @@ EOF
         || [[ -n "$CLI_ENDPOINT" ]] || [[ "$CLI_DISABLE_IPV6" != "default" ]] \
         || [[ "${CLI_ALLOW_IPV6_TUNNEL:-0}" -eq 1 ]] || [[ -n "${CLI_PRESET:-}" ]] \
         || [[ -n "${CLI_JC:-}" ]] || [[ -n "${CLI_JMIN:-}" ]] || [[ -n "${CLI_JMAX:-}" ]] \
+        || [[ "${CLI_ISOLATION:-default}" != "default" ]] \
         || [[ "${CLI_NO_CPS:-0}" -eq 1 ]]; }; then
         log_warn "Незавершённая установка (шаг $current_step) + CLI-параметры конфигурации: возврат к шагу 4, чтобы firewall и конфиги были перегенерированы с новыми значениями."
         current_step=4
@@ -3300,6 +3476,17 @@ step7_start_service() {
     log "### ШАГ 7: Запуск сервиса и настройка безопасности ###"
 
     log "Включение и запуск awg-quick@awg0..."
+
+    # Переключение изоляции on->off: PostDown нового конфига DROP-правило не
+    # снимет (его там больше нет), а down-фаза restart работает уже с новым
+    # конфигом на диске. Убираем stale-правила явно, циклом - при повторных
+    # прерванных запусках их могло накопиться несколько (issue #178, паттерн
+    # отложенной уборки как у PREV_AWG_PORT в #175).
+    if [[ "${CLIENT_ISOLATION:-1}" -eq 0 ]]; then
+        while iptables -D FORWARD -i awg0 -o awg0 -j DROP 2>/dev/null; do :; done
+        while ip6tables -D FORWARD -i awg0 -o awg0 -j DROP 2>/dev/null; do :; done
+    fi
+
     if systemctl is-active --quiet awg-quick@awg0; then
         log "Сервис уже активен — перезапуск для применения конфигурации..."
         systemctl enable awg-quick@awg0 || log_warn "Не удалось enable awg-quick@awg0 — проверьте автозапуск вручную"
