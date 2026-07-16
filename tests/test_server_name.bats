@@ -99,19 +99,46 @@ CONF
         ok  "Мой сервер"        cyrillic
         ok  "domen.com"         domain
         ok  "vpn-01_home"       symbols
+        # 64 cyrillic chars = 128 UTF-8 bytes: must fit regardless of locale
+        ok  "$(python3 -c "print(chr(1103)*64)")" cyr64
         bad ""                  empty
-        bad "$(printf "a%.0s" {1..65})" toolong
+        bad "$(printf "a%.0s" {1..129})" toolong
         bad "has'\''quote"          squote
         bad "has\"dquote"       dquote
         bad "has\\back"         backslash
         bad "$(printf "a\tb")"  tab
         bad "$(printf "a\nb")"  newline
+        # ESC from arrow keys in interactive input would break the URI JSON
+        bad "$(printf "a\033[Db")" esc
+        bad " leading"          leadspace
+        bad "trailing "         trailspace
     '
     [ "$status" -eq 0 ]
-    for tag in ok:plain ok:cyrillic ok:domain ok:symbols \
-               bad:empty bad:toolong bad:squote bad:dquote bad:backslash bad:tab bad:newline; do
+    for tag in ok:plain ok:cyrillic ok:domain ok:symbols ok:cyr64 \
+               bad:empty bad:toolong bad:squote bad:dquote bad:backslash \
+               bad:tab bad:newline bad:esc bad:leadspace bad:trailspace; do
         [[ "$output" == *"$tag"* ]]
     done
+}
+
+@test "D#180 functional: configure_server_name trims accidental surrounding whitespace" {
+    fns=$(awk '/^validate_server_name\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh"
+          awk '/^_trim_ws\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh"
+          awk '/^configure_server_name\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh")
+    [ -n "$fns" ]
+    run bash -c '
+        log() { :; }; log_warn() { :; }; die() { echo "DIE"; exit 1; }
+        CONFIG_FILE=/dev/null
+        '"$fns"'
+        CLI_SERVER_NAME="  My VPN  " AWG_SERVER_NAME="" AUTO_YES=1 config_exists=0
+        configure_server_name; echo "cli:[$AWG_SERVER_NAME]"
+        # whitespace-only config value -> trimmed to empty -> invalid -> default
+        CLI_SERVER_NAME="" AWG_SERVER_NAME="   " AUTO_YES=1 config_exists=1
+        configure_server_name; echo "blank:[$AWG_SERVER_NAME]"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'cli:[My VPN]'* ]]
+    [[ "$output" == *'blank:[AWG Server]'* ]]
 }
 
 @test "D#180: RU/EN validate_server_name bodies are identical" {
@@ -127,6 +154,7 @@ CONF
 
 @test "D#180 functional: configure_server_name priority CLI > config > default" {
     fns=$(awk '/^validate_server_name\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh"
+          awk '/^_trim_ws\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh"
           awk '/^configure_server_name\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh")
     [ -n "$fns" ]
     run bash -c '
@@ -151,6 +179,7 @@ CONF
 
 @test "D#180 functional: configure_server_name dies on invalid CLI, sanitizes invalid config value" {
     fns=$(awk '/^validate_server_name\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh"
+          awk '/^_trim_ws\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh"
           awk '/^configure_server_name\(\)/,/^}/' "$BATS_TEST_DIRNAME/../install_amneziawg.sh")
     [ -n "$fns" ]
     run bash -c '

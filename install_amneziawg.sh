@@ -33,7 +33,7 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="9c9728fd7965258b2569404f4e7e50eb2d1b1f0f4b91a285c0646a7931cc4446"
+COMMON_SCRIPT_SHA256="8acc7fe56ec3b5bfdcb0ccaf4ed7eebc305a664524a66fc70542add10c081b4d"
 MANAGE_SCRIPT_SHA256="ced685738dd4910a393cd573c550e9973a6073f3437ea8021206db18e49e64c0"
 
 # Флаги CLI
@@ -297,7 +297,7 @@ show_help() {
                         off: подсеть туннеля добавляется в AllowedIPs клиентов
   --endpoint=АДРЕС      Внешний endpoint сервера: FQDN, IPv4 или [IPv6] (для NAT)
   --server-name=ИМЯ     Имя сервера в приложении Amnezia при импорте vpn://
-                        (по умолчанию 'AWG Server'; до 64 символов, без кавычек)
+                        (по умолчанию 'AWG Server'; без кавычек и управляющих символов)
   --mobile              Мобильный сетап одним флагом: --preset=mobile + порт 443/udp
                         (мобильные операторы часто глушат нестандартные UDP-порты).
                         Явный --port=N выигрывает над портом 443
@@ -877,14 +877,29 @@ _apply_isolation_to_allowed_ips() {
 # Валидация имени сервера для vpn:// URI (D#180): поле description показывается
 # в приложении Amnezia после импорта. Ограничения продиктованы хранением в
 # awgsetup_cfg.init (обёртка '...') и вложением в JSON: без кавычек и бэкслеша,
-# без переводов строк и табов, длина 1-64.
+# без управляющих символов ([[:cntrl:]] целиком: ESC от стрелок в интерактивном
+# вводе ломал бы JSON - je() контролы не экранирует), без пробелов по краям
+# (клиент показал бы визуально пустое имя). Длина - до 128 БАЙТ в C-локали
+# (LC_ALL=C даёт предсказуемый счёт на любой системной локали; 128 байт
+# вмещают 64 кириллических символа UTF-8).
 validate_server_name() {
     local n="$1"
+    local LC_ALL=C
     [[ -n "$n" ]] || return 1
-    (( ${#n} <= 64 )) || return 1
+    (( ${#n} <= 128 )) || return 1
     [[ "$n" == *"'"* || "$n" == *'"'* || "$n" == *'\'* ]] && return 1
-    [[ "$n" == *$'\n'* || "$n" == *$'\t'* || "$n" == *$'\r'* ]] && return 1
+    [[ "$n" == *[[:cntrl:]]* ]] && return 1
+    [[ "$n" == " "* || "$n" == *" " ]] && return 1
     return 0
+}
+
+# Срез пробелов по краям (для дружелюбия: случайный хвостовой пробел в
+# --server-name или интерактивном вводе не должен валить установку).
+_trim_ws() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
 }
 
 # --mobile (D#38, полевой тест 26 jun): shorthand мобильного сетапа =
@@ -909,13 +924,18 @@ resolve_mobile_flag() {
 # Значение из конфига перепроверяется: файл могли править руками, а имя
 # уходит в JSON vpn:// URI.
 configure_server_name() {
+    local _name
     if [[ -n "$CLI_SERVER_NAME" ]]; then
-        validate_server_name "$CLI_SERVER_NAME" \
-            || die "Некорректное --server-name: до 64 символов, без кавычек, бэкслеша и переводов строк."
-        AWG_SERVER_NAME="$CLI_SERVER_NAME"
+        _name=$(_trim_ws "$CLI_SERVER_NAME")
+        validate_server_name "$_name" \
+            || die "Некорректное --server-name: без кавычек, бэкслеша и управляющих символов, не длиннее 128 байт."
+        AWG_SERVER_NAME="$_name"
         log "Имя сервера из CLI: ${AWG_SERVER_NAME}"
     elif [[ -n "${AWG_SERVER_NAME:-}" ]]; then
-        if ! validate_server_name "$AWG_SERVER_NAME"; then
+        _name=$(_trim_ws "$AWG_SERVER_NAME")
+        if validate_server_name "$_name"; then
+            AWG_SERVER_NAME="$_name"
+        else
             log_warn "AWG_SERVER_NAME из $CONFIG_FILE не валидно, использую 'AWG Server'."
             AWG_SERVER_NAME="AWG Server"
         fi
@@ -925,9 +945,10 @@ configure_server_name() {
         local input_name
         while true; do
             read -rp "Имя сервера в приложении Amnezia [AWG Server]: " input_name < /dev/tty
+            input_name=$(_trim_ws "$input_name")
             if [[ -z "$input_name" ]]; then AWG_SERVER_NAME="AWG Server"; break; fi
             if validate_server_name "$input_name"; then AWG_SERVER_NAME="$input_name"; break; fi
-            log_warn "До 64 символов, без кавычек и бэкслеша. Повторите ввод."
+            log_warn "Без кавычек, бэкслеша и управляющих символов, не длиннее 128 байт. Повторите ввод."
         done
     fi
     export AWG_SERVER_NAME

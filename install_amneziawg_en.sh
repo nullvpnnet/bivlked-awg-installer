@@ -33,7 +33,7 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Verified in step5_download_scripts() after curl.
 # Verification is skipped when AWG_BRANCH is overridden (test branch).
 # Format: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="badf0b09f92366d93fc6be632af590c11826c0415340adc92e08d7cf55c0297c"
+COMMON_SCRIPT_SHA256="b47cbd35247086f984447fc0ce4ed0162e68e0d2456d86dc91dd6d5f415f445a"
 MANAGE_SCRIPT_SHA256="9df756c7ab089cd0861300ca116506ef694877481dbcd0ec2d8af2c5962052a0"
 
 # CLI flags
@@ -300,7 +300,7 @@ Options:
                         off: the tunnel subnet is added to client AllowedIPs
   --endpoint=ADDR       External server endpoint: FQDN, IPv4 or [IPv6] (NAT)
   --server-name=NAME    Server name shown in the Amnezia app on vpn:// import
-                        (default 'AWG Server'; up to 64 chars, no quotes)
+                        (default 'AWG Server'; no quotes or control characters)
   --mobile              Mobile setup in one flag: --preset=mobile + port 443/udp
                         (mobile carriers often kill non-standard UDP ports).
                         An explicit --port=N wins over port 443
@@ -886,14 +886,30 @@ _apply_isolation_to_allowed_ips() {
 # Server-name validation for the vpn:// URI (D#180): the description field is
 # shown in the Amnezia app after import. The constraints follow from storage
 # in awgsetup_cfg.init (the '...' wrapper) and JSON embedding: no quotes or
-# backslash, no newlines or tabs, length 1-64.
+# backslash, no control characters (the whole [[:cntrl:]] class: an ESC from
+# arrow keys in interactive input would break the JSON - je() does not escape
+# controls), no leading/trailing spaces (the client would show a visually
+# empty name). Length - up to 128 BYTES in the C locale (LC_ALL=C gives a
+# predictable count on any system locale; 128 bytes fit 64 two-byte UTF-8
+# characters).
 validate_server_name() {
     local n="$1"
+    local LC_ALL=C
     [[ -n "$n" ]] || return 1
-    (( ${#n} <= 64 )) || return 1
+    (( ${#n} <= 128 )) || return 1
     [[ "$n" == *"'"* || "$n" == *'"'* || "$n" == *'\'* ]] && return 1
-    [[ "$n" == *$'\n'* || "$n" == *$'\t'* || "$n" == *$'\r'* ]] && return 1
+    [[ "$n" == *[[:cntrl:]]* ]] && return 1
+    [[ "$n" == " "* || "$n" == *" " ]] && return 1
     return 0
+}
+
+# Trim surrounding whitespace (friendliness: an accidental trailing space in
+# --server-name or interactive input must not fail the install).
+_trim_ws() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
 }
 
 # --mobile (D#38, field test 26 jun): mobile-setup shorthand =
@@ -918,13 +934,18 @@ resolve_mobile_flag() {
 # value is re-validated: the file can be hand-edited, and the name goes into
 # the vpn:// URI JSON.
 configure_server_name() {
+    local _name
     if [[ -n "$CLI_SERVER_NAME" ]]; then
-        validate_server_name "$CLI_SERVER_NAME" \
-            || die "Invalid --server-name: up to 64 chars, no quotes, backslash or newlines."
-        AWG_SERVER_NAME="$CLI_SERVER_NAME"
+        _name=$(_trim_ws "$CLI_SERVER_NAME")
+        validate_server_name "$_name" \
+            || die "Invalid --server-name: no quotes, backslash or control characters, at most 128 bytes."
+        AWG_SERVER_NAME="$_name"
         log "Server name from CLI: ${AWG_SERVER_NAME}"
     elif [[ -n "${AWG_SERVER_NAME:-}" ]]; then
-        if ! validate_server_name "$AWG_SERVER_NAME"; then
+        _name=$(_trim_ws "$AWG_SERVER_NAME")
+        if validate_server_name "$_name"; then
+            AWG_SERVER_NAME="$_name"
+        else
             log_warn "AWG_SERVER_NAME from $CONFIG_FILE is invalid, using 'AWG Server'."
             AWG_SERVER_NAME="AWG Server"
         fi
@@ -934,9 +955,10 @@ configure_server_name() {
         local input_name
         while true; do
             read -rp "Server name in the Amnezia app [AWG Server]: " input_name < /dev/tty
+            input_name=$(_trim_ws "$input_name")
             if [[ -z "$input_name" ]]; then AWG_SERVER_NAME="AWG Server"; break; fi
             if validate_server_name "$input_name"; then AWG_SERVER_NAME="$input_name"; break; fi
-            log_warn "Up to 64 chars, no quotes or backslash. Try again."
+            log_warn "No quotes, backslash or control characters, at most 128 bytes. Try again."
         done
     fi
     export AWG_SERVER_NAME
