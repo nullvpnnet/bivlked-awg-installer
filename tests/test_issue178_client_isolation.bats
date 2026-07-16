@@ -162,7 +162,7 @@
 
 @test "issue #178: CLIENT_ISOLATION whitelisted in safe_load_config (all four copies)" {
     for f in awg_common.sh awg_common_en.sh install_amneziawg.sh install_amneziawg_en.sh; do
-        run grep -c 'PREV_AWG_PORT|CLIENT_ISOLATION|CLIENT_ISOLATION_NET)' "$BATS_TEST_DIRNAME/../$f"
+        run grep -c 'PREV_AWG_PORT|CLIENT_ISOLATION|CLIENT_ISOLATION_NET' "$BATS_TEST_DIRNAME/../$f"
         [ "$status" -eq 0 ]
         [ "$output" -ge 1 ]
     done
