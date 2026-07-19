@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [5.20.1] - 2026-07-18
 
-**v5.20.1** - a clear error when manage and awg_common versions drift apart, plus a precise path traversal check on restore.
+**v5.20.1** - version guard: manage and awg_common now check each other's versions and tell you how to update, plus a precise path traversal check on restore.
 
 ### Fixed
 
