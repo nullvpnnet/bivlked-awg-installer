@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # Скрипт для управления пользователями (пирами) AmneziaWG 2.0
 # Автор: @bivlked
-# Версия: 5.21.0
+# Версия: 5.21.1
 # Дата: 2026-07-20
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.21.0"
+SCRIPT_VERSION="5.21.1"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -132,6 +132,27 @@ json_escape() {
         done
     fi
     printf '%s' "$s"
+}
+
+# Порту из awgsetup_cfg.init нельзя доверять до проверки: файл правят руками,
+# и там оказывается что угодно. Значение уходит в JSON без кавычек (и тогда
+# "number":abc не разбирается), в арифметические сравнения (где bash выполняет
+# подстановку команд из строки вида a[$(...)]) и в regex правил UFW.
+# Функция, а не пара строк по месту: так её исполняет тест, а не копия логики.
+_sanitize_port() {
+    local p="${1:-}"
+    # Пробелы по краям срезаю: 'AWG_PORT=39743 ' - обычный след ручной правки,
+    # и это тот же самый порт. Раньше такой конфиг ронял проверку впустую.
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+    # {1,5} отсекает переполнение 64-битной арифметики: длинная строка цифр
+    # молча приземлилась бы внутрь допустимого диапазона. 10# снимает
+    # восьмеричную трактовку значений с ведущим нулём (0070 иначе даст 56).
+    if [[ "$p" =~ ^[0-9]{1,5}$ ]] && (( 10#$p >= 1 && 10#$p <= 65535 )); then
+        printf '%s' "$((10#$p))"
+    else
+        printf '0'
+    fi
 }
 
 # Единственная точка печати JSON в stdout. Правило контракта: при --json
@@ -1176,9 +1197,22 @@ check_server() {
 
     log "Прослушивание порта:"
     safe_load_config "$CONFIG_FILE" 2>/dev/null
-    local port=${AWG_PORT:-0}
+    local port
+    port=$(_sanitize_port "${AWG_PORT:-}")
     if [[ "$port" -eq 0 ]]; then
-        log_warn " - Не удалось определить порт."
+        if [[ -n "${AWG_PORT:-}" ]]; then
+            # В конфиге что-то лежит, но портом это не является: файл повреждён,
+            # а не «настройка не задана». Молчать нельзя - для мониторинга это
+            # такая же поломка, как незапущенный сервис. Значение показываю
+            # обрезанным и без управляющих символов: строка там произвольная и
+            # может утащить с собой перевод строки или ESC-последовательность.
+            local _bad_port="${AWG_PORT:0:32}"
+            _bad_port="${_bad_port//[^[:print:]]/?}"
+            log_error " - Порт в конфиге некорректный: '${_bad_port}'."
+            ok=0
+        else
+            log_warn " - Не удалось определить порт."
+        fi
     else
         if ! ss -lunp | grep -q ":${port} "; then
             log_error " - Порт ${port}/udp НЕ прослушивается!"
@@ -1372,11 +1406,29 @@ diagnose_server() {
 
     # 6. UFW state + AWG port
     safe_load_config "$CONFIG_FILE" 2>/dev/null
-    local awg_port="${AWG_PORT:-39743}"
+    # Порт берётся без дефолта: подставить 39743 и отчитаться по нему значило бы
+    # утверждать про порт, которого в конфиге нет. Заодно значение больше не
+    # попадает сырым в regex ниже, где '.*' совпадал с любым правилом.
+    local awg_port
+    awg_port=$(_sanitize_port "${AWG_PORT:-}")
     if command -v ufw &>/dev/null; then
         local ufw_st
         ufw_st=$(ufw status 2>/dev/null | head -1)
-        if [[ "$ufw_st" == "Status: active" ]]; then
+        if [[ "$awg_port" -eq 0 ]]; then
+            # Состояние фаервола называю и здесь: это отдельная находка, и
+            # терять её из-за неисправного порта нельзя.
+            local _ufw_state_txt="UFW active"
+            [[ "$ufw_st" == "Status: active" ]] || _ufw_state_txt="UFW не active ($ufw_st)"
+            if [[ -n "${AWG_PORT:-}" ]]; then
+                local _bad_port="${AWG_PORT:0:32}"
+                _bad_port="${_bad_port//[^[:print:]]/?}"
+                _diag_line FAIL "${_ufw_state_txt}; порт в конфиге некорректный ('${_bad_port}'), правило не проверено"
+                fail=$((fail+1))
+            else
+                _diag_line WARN "${_ufw_state_txt}; порт в конфиге не найден, правило не проверено"
+                warn=$((warn+1))
+            fi
+        elif [[ "$ufw_st" == "Status: active" ]]; then
             if ufw status 2>/dev/null | grep -qE "^${awg_port}/udp[[:space:]]+ALLOW"; then
                 _diag_line OK "UFW active, ${awg_port}/udp ALLOW"; ok=$((ok+1))
             else

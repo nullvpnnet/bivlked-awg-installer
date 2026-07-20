@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 peer management script
 # Author: @bivlked
-# Version: 5.21.0
+# Version: 5.21.1
 # Date: 2026-07-20
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.21.0"
+SCRIPT_VERSION="5.21.1"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -133,6 +133,29 @@ json_escape() {
         done
     fi
     printf '%s' "$s"
+}
+
+# The port from awgsetup_cfg.init cannot be trusted before it is checked: the
+# file gets hand-edited and ends up holding anything. The value goes into JSON
+# unquoted (and then "number":abc does not parse), into arithmetic comparisons
+# (where bash runs command substitution from a value like a[$(...)]) and into
+# the UFW rule regex.
+# A function, not two lines in place: this way the test runs the real code.
+_sanitize_port() {
+    local p="${1:-}"
+    # Surrounding whitespace is trimmed: 'AWG_PORT=39743 ' is an ordinary
+    # leftover of a hand edit and means the same port. Such a config used to
+    # fail the check for nothing.
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+    # {1,5} rules out 64-bit arithmetic overflow: a long digit string would
+    # quietly land inside the valid range. 10# rules out octal reading of
+    # values with a leading zero (0070 would otherwise be 56).
+    if [[ "$p" =~ ^[0-9]{1,5}$ ]] && (( 10#$p >= 1 && 10#$p <= 65535 )); then
+        printf '%s' "$((10#$p))"
+    else
+        printf '0'
+    fi
 }
 
 # The single point that prints JSON to stdout. Contract rule: with --json,
@@ -1190,9 +1213,22 @@ check_server() {
 
     log "Port listening:"
     safe_load_config "$CONFIG_FILE" 2>/dev/null
-    local port=${AWG_PORT:-0}
+    local port
+    port=$(_sanitize_port "${AWG_PORT:-}")
     if [[ "$port" -eq 0 ]]; then
-        log_warn " - Failed to determine port."
+        if [[ -n "${AWG_PORT:-}" ]]; then
+            # The config holds something that is not a port: the file is
+            # corrupt, not "the setting is unset". Staying quiet is wrong - for
+            # monitoring this is as broken as a dead service. The value is
+            # shown truncated and stripped of control characters: it is an
+            # arbitrary string and may drag in a newline or an ESC sequence.
+            local _bad_port="${AWG_PORT:0:32}"
+            _bad_port="${_bad_port//[^[:print:]]/?}"
+            log_error " - The port in the config is invalid: '${_bad_port}'."
+            ok=0
+        else
+            log_warn " - Failed to determine port."
+        fi
     else
         if ! ss -lunp | grep -q ":${port} "; then
             log_error " - Port ${port}/udp is NOT listening!"
@@ -1386,11 +1422,29 @@ diagnose_server() {
 
     # 6. UFW state + AWG port
     safe_load_config "$CONFIG_FILE" 2>/dev/null
-    local awg_port="${AWG_PORT:-39743}"
+    # The port is taken without a default: substituting 39743 and reporting on
+    # it would mean asserting a port the config does not hold. It also stops the
+    # raw value reaching the regex below, where '.*' matched any rule.
+    local awg_port
+    awg_port=$(_sanitize_port "${AWG_PORT:-}")
     if command -v ufw &>/dev/null; then
         local ufw_st
         ufw_st=$(ufw status 2>/dev/null | head -1)
-        if [[ "$ufw_st" == "Status: active" ]]; then
+        if [[ "$awg_port" -eq 0 ]]; then
+            # The firewall state is named here too: it is a separate finding and
+            # must not be lost because the port is broken.
+            local _ufw_state_txt="UFW active"
+            [[ "$ufw_st" == "Status: active" ]] || _ufw_state_txt="UFW not active ($ufw_st)"
+            if [[ -n "${AWG_PORT:-}" ]]; then
+                local _bad_port="${AWG_PORT:0:32}"
+                _bad_port="${_bad_port//[^[:print:]]/?}"
+                _diag_line FAIL "${_ufw_state_txt}; the port in the config is invalid ('${_bad_port}'), rule not checked"
+                fail=$((fail+1))
+            else
+                _diag_line WARN "${_ufw_state_txt}; no port found in the config, rule not checked"
+                warn=$((warn+1))
+            fi
+        elif [[ "$ufw_st" == "Status: active" ]]; then
             if ufw status 2>/dev/null | grep -qE "^${awg_port}/udp[[:space:]]+ALLOW"; then
                 _diag_line OK "UFW active, ${awg_port}/udp ALLOW"; ok=$((ok+1))
             else

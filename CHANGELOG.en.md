@@ -12,6 +12,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [5.21.1] - 2026-07-20
+
+**v5.21.1** - validated port handling in `check`: the output stays parseable whatever the config holds, and a corrupt config no longer looks healthy.
+
+### Fixed
+
+- **`check --json` no longer breaks on a non-numeric `AWG_PORT`**: the value from `awgsetup_cfg.init` went into the `port.number` field unchecked, so after a bad hand-edit of the config the output stopped being valid JSON - against the v5.21.0 promise of one parseable document on every exit path. The port is now validated as it is read and normalised to a number: 1-65535 stays a port, anything else becomes `0`
+- **A corrupt port in the config is now an error, not a silent warning**: `check` with `AWG_PORT=abc` used to finish with `ok=true`, so monitoring saw nothing wrong. A non-empty value that is not a port now yields `ok=false` and exit code 1. A missing setting stays a warning, as before
+- The same unchecked value also reached the `[[ -eq ]]` arithmetic comparison, where bash performs command substitution, and the UFW rule regex in `diagnose`, where `.*` matched anything. Both now get an already-validated number
+
 ## [5.21.0] - 2026-07-20
 
 **v5.21.0** - JSON output for management commands and a strict confirmation mode for automation.
@@ -1594,7 +1604,8 @@ Major security and reliability update after several consecutive code audits. The
 - Diagnostic report (`--diagnostic`).
 - Full uninstall (`--uninstall`).
 
-[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v5.21.0...HEAD
+[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v5.21.1...HEAD
+[5.21.1]: https://github.com/bivlked/amneziawg-installer/compare/v5.21.0...v5.21.1
 [5.21.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.20.1...v5.21.0
 [5.20.1]: https://github.com/bivlked/amneziawg-installer/compare/v5.20.0...v5.20.1
 [5.20.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.19.2...v5.20.0
